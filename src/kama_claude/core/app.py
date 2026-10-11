@@ -7,8 +7,10 @@ import json
 import logging
 import signal
 import time
+from contextlib import ExitStack
 from datetime import UTC
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 from pydantic import BaseModel
@@ -50,6 +52,29 @@ from kama_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
 from kama_claude.core.transport.socket_server import SocketServer, get_connection_writer
 
 logger = logging.getLogger(__name__)
+
+
+# 注册跨平台退出信号并等待通知，结束后恢复原有处理器
+async def _wait_for_shutdown() -> None:
+    loop = asyncio.get_running_loop()
+    shutdown = asyncio.Event()
+
+    # 将同步信号通知转交事件循环，唤醒正在等待的守护进程
+    def on_signal(signum: int, frame: FrameType | None) -> None:
+        loop.call_soon_threadsafe(shutdown.set)
+
+    with ExitStack() as cleanup:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous = signal.getsignal(sig)
+            try:
+                loop.add_signal_handler(sig, shutdown.set)
+            except NotImplementedError:
+                signal.signal(sig, on_signal)
+                cleanup.callback(signal.signal, sig, previous)
+            else:
+                cleanup.callback(signal.signal, sig, previous)
+                cleanup.callback(loop.remove_signal_handler, sig)
+        await shutdown.wait()
 
 
 def _now() -> str:
@@ -273,23 +298,19 @@ class CoreApp:
         logger.info("kama-core %s listening addr=%s", kama_claude.__version__, addr)
         logger.info("config: %s", self._config)
 
-        loop = asyncio.get_running_loop()
-        shutdown = asyncio.Event()
-        loop.add_signal_handler(signal.SIGINT, shutdown.set)
-        loop.add_signal_handler(signal.SIGTERM, shutdown.set)
-
-        await shutdown.wait()
-
-        logger.info("shutting down")
-        for run_task in list(self._running_runs):
-            run_task.cancel()
-        if self._running_runs:
-            await asyncio.gather(*self._running_runs, return_exceptions=True)
-        if self._mcp_manager is not None:
-            await self._mcp_manager.stop_all()
-        await server.stop()
-        if self._trace is not None:
-            await self._trace.stop()
+        try:
+            await _wait_for_shutdown()
+        finally:
+            logger.info("shutting down")
+            for run_task in list(self._running_runs):
+                run_task.cancel()
+            if self._running_runs:
+                await asyncio.gather(*self._running_runs, return_exceptions=True)
+            if self._mcp_manager is not None:
+                await self._mcp_manager.stop_all()
+            await server.stop()
+            if self._trace is not None:
+                await self._trace.stop()
 
 
 # 同步入口：启动 CoreApp 事件循环

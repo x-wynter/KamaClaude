@@ -11,6 +11,15 @@ from collections.abc import AsyncGenerator
 import pytest
 
 
+# 将默认测试临时目录放入项目缓存，保留用户显式指定的临时目录设置
+def pytest_configure(config: pytest.Config) -> None:
+    if config.option.basetemp is None and "PYTEST_DEBUG_TEMPROOT" not in os.environ:
+        temp_root = config.rootpath / ".pytest_cache" / "tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        os.environ["PYTEST_DEBUG_TEMPROOT"] = str(temp_root)
+        config.add_cleanup(lambda: os.environ.pop("PYTEST_DEBUG_TEMPROOT", None))
+
+
 @pytest.fixture
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

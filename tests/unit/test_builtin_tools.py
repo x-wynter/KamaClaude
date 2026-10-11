@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -28,11 +31,13 @@ async def test_bash_nonzero_exit_is_error() -> None:
     assert "[exit 2]" in result.content
 
 
-# 功能：验证命令超时后 is_error=True，error_type 为 "timeout"
-# 设计：timeout=1s 搭配 sleep 2 必然超时；验证 error_type 而非 content，避免超时消息格式耦合
 @pytest.mark.asyncio
+# 功能：验证命令超时后 is_error=True，error_type 为 "timeout"
+# 设计：用当前 Python 解释器休眠避免依赖 Unix sleep，并按平台引用含空格的路径
 async def test_bash_timeout() -> None:
-    result = await BashTool().invoke({"command": "sleep 5", "timeout": 1})
+    args = [sys.executable, "-c", "import time; time.sleep(2)"]
+    command = subprocess.list2cmdline(args) if sys.platform == "win32" else shlex.join(args)
+    result = await BashTool().invoke({"command": command, "timeout": 1})
     assert result.is_error
     assert result.error_type == "timeout"
 
