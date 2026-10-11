@@ -5,6 +5,8 @@ import datetime
 import logging
 import signal
 import time
+from contextlib import ExitStack
+from types import FrameType
 from typing import Any
 
 import kama_claude
@@ -14,6 +16,29 @@ from kama_claude.core.logging_setup import setup_logging
 from kama_claude.core.transport.socket_server import SocketServer
 
 logger = logging.getLogger(__name__)
+
+
+# 注册跨平台退出信号并等待通知，结束后恢复原有处理器
+async def _wait_for_shutdown() -> None:
+    loop = asyncio.get_running_loop()
+    shutdown = asyncio.Event()
+
+    # 将同步信号通知转交事件循环，唤醒正在等待的守护进程
+    def on_signal(signum: int, frame: FrameType | None) -> None:
+        loop.call_soon_threadsafe(shutdown.set)
+
+    with ExitStack() as cleanup:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous = signal.getsignal(sig)
+            try:
+                loop.add_signal_handler(sig, shutdown.set)
+            except NotImplementedError:
+                signal.signal(sig, on_signal)
+                cleanup.callback(signal.signal, sig, previous)
+            else:
+                cleanup.callback(signal.signal, sig, previous)
+                cleanup.callback(loop.remove_signal_handler, sig)
+        await shutdown.wait()
 
 
 class CoreApp:
@@ -43,15 +68,12 @@ class CoreApp:
         logger.info("kama-core %s listening addr=%s", kama_claude.__version__, addr)
         logger.info("config: %s", config)
 
-        loop = asyncio.get_running_loop()
-        shutdown = asyncio.Event()
-        loop.add_signal_handler(signal.SIGINT, shutdown.set)
-        loop.add_signal_handler(signal.SIGTERM, shutdown.set)
+        try:
+            await _wait_for_shutdown()
+        finally:
+            logger.info("shutting down")
+            await server.stop()
 
-        await shutdown.wait()
-
-        logger.info("shutting down")
-        await server.stop()
 
 
 # 同步入口：启动 CoreApp 事件循环
