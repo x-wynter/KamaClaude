@@ -12,12 +12,10 @@
 
 ### PingCommand
 
-
-| Field    | Type     | Required |
-| -------- | -------- | -------- |
-| `type`   | `string` | no       |
-| `client` | `string` | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `client` | `string` | yes |
 
 ```json
 {
@@ -56,13 +54,11 @@
 
 ### PongResult
 
-
-| Field            | Type      | Required |
-| ---------------- | --------- | -------- |
-| `server_version` | `string`  | yes      |
-| `uptime_ms`      | `integer` | yes      |
-| `received_at`    | `string`  | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `server_version` | `string` | yes |
+| `uptime_ms` | `integer` | yes |
+| `received_at` | `string` | yes |
 
 ```json
 {
@@ -110,13 +106,11 @@ Events sent over the IPC socket (daemon → client).
 
 ### CoreStartedEvent
 
-
-| Field         | Type     | Required |
-| ------------- | -------- | -------- |
-| `type`        | `string` | no       |
-| `listen_addr` | `string` | yes      |
-| `version`     | `string` | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `listen_addr` | `string` | yes |
+| `version` | `string` | yes |
 
 ```json
 {
@@ -151,14 +145,12 @@ Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).
 
 ### RunStartedEvent
 
-
-| Field    | Type     | Required |
-| -------- | -------- | -------- |
-| `type`   | `string` | no       |
-| `run_id` | `string` | yes      |
-| `goal`   | `string` | yes      |
-| `ts`     | `string` | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `goal` | `string` | yes |
+| `ts` | `string` | yes |
 
 ```json
 {
@@ -205,16 +197,14 @@ Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).
 
 ### RunFinishedEvent
 
-
-| Field    | Type      | Required |
-| -------- | --------- | -------- |
-| `type`   | `string`  | no       |
-| `run_id` | `string`  | yes      |
-| `status` | `string`  | yes      |
-| `reason` | `string   | null`    |
-| `steps`  | `integer` | yes      |
-| `ts`     | `string`  | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `status` | `string` | yes |
+| `reason` | `string | null` | no |
+| `steps` | `integer` | yes |
+| `ts` | `string` | yes |
 
 ```json
 {
@@ -280,14 +270,12 @@ Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).
 
 ### StepStartedEvent
 
-
-| Field    | Type      | Required |
-| -------- | --------- | -------- |
-| `type`   | `string`  | no       |
-| `run_id` | `string`  | yes      |
-| `step`   | `integer` | yes      |
-| `ts`     | `string`  | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `step` | `integer` | yes |
+| `ts` | `string` | yes |
 
 ```json
 {
@@ -334,14 +322,12 @@ Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).
 
 ### StepFinishedEvent
 
-
-| Field    | Type      | Required |
-| -------- | --------- | -------- |
-| `type`   | `string`  | no       |
-| `run_id` | `string`  | yes      |
-| `step`   | `integer` | yes      |
-| `ts`     | `string`  | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `step` | `integer` | yes |
+| `ts` | `string` | yes |
 
 ```json
 {
@@ -388,16 +374,14 @@ Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).
 
 ### ToolCallStartedEvent
 
-
-| Field         | Type     | Required |
-| ------------- | -------- | -------- |
-| `type`        | `string` | no       |
-| `run_id`      | `string` | yes      |
-| `tool_use_id` | `string` | yes      |
-| `tool_name`   | `string` | yes      |
-| `params`      | `object` | yes      |
-| `ts`          | `string` | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `tool_use_id` | `string` | yes |
+| `tool_name` | `string` | yes |
+| `params` | `object` | yes |
+| `ts` | `string` | yes |
 
 ```json
 {
@@ -459,16 +443,14 @@ Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).
 
 ### ToolCallFinishedEvent
 
-
-| Field         | Type      | Required |
-| ------------- | --------- | -------- |
-| `type`        | `string`  | no       |
-| `run_id`      | `string`  | yes      |
-| `tool_use_id` | `string`  | yes      |
-| `tool_name`   | `string`  | yes      |
-| `elapsed_ms`  | `integer` | yes      |
-| `ts`          | `string`  | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `tool_use_id` | `string` | yes |
+| `tool_name` | `string` | yes |
+| `elapsed_ms` | `integer` | yes |
+| `ts` | `string` | yes |
 
 ```json
 {
@@ -527,18 +509,16 @@ Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).
 
 ### ToolCallFailedEvent
 
-
-| Field           | Type      | Required |
-| --------------- | --------- | -------- |
-| `type`          | `string`  | no       |
-| `run_id`        | `string`  | yes      |
-| `tool_use_id`   | `string`  | yes      |
-| `tool_name`     | `string`  | yes      |
-| `error_type`    | `string`  | yes      |
-| `error_message` | `string`  | yes      |
-| `elapsed_ms`    | `integer` | yes      |
-| `ts`            | `string`  | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `tool_use_id` | `string` | yes |
+| `tool_name` | `string` | yes |
+| `error_type` | `string` | yes |
+| `error_message` | `string` | yes |
+| `elapsed_ms` | `integer` | yes |
+| `ts` | `string` | yes |
 
 ```json
 {
@@ -609,15 +589,13 @@ Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).
 
 ### LlmModelSelectedEvent
 
-
-| Field      | Type     | Required |
-| ---------- | -------- | -------- |
-| `type`     | `string` | no       |
-| `run_id`   | `string` | yes      |
-| `model`    | `string` | yes      |
-| `strategy` | `string` | yes      |
-| `ts`       | `string` | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `model` | `string` | yes |
+| `strategy` | `string` | yes |
+| `ts` | `string` | yes |
 
 ```json
 {
@@ -670,14 +648,12 @@ Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).
 
 ### LlmTokenEvent
 
-
-| Field    | Type     | Required |
-| -------- | -------- | -------- |
-| `type`   | `string` | no       |
-| `run_id` | `string` | yes      |
-| `token`  | `string` | yes      |
-| `ts`     | `string` | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `token` | `string` | yes |
+| `ts` | `string` | yes |
 
 ```json
 {
@@ -724,17 +700,15 @@ Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).
 
 ### LlmUsageEvent
 
-
-| Field                         | Type      | Required |
-| ----------------------------- | --------- | -------- |
-| `type`                        | `string`  | no       |
-| `run_id`                      | `string`  | yes      |
-| `input_tokens`                | `integer` | yes      |
-| `output_tokens`               | `integer` | yes      |
-| `cache_read_input_tokens`     | `integer` | yes      |
-| `cache_creation_input_tokens` | `integer` | yes      |
-| `ts`                          | `string`  | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `input_tokens` | `integer` | yes |
+| `output_tokens` | `integer` | yes |
+| `cache_read_input_tokens` | `integer` | yes |
+| `cache_creation_input_tokens` | `integer` | yes |
+| `ts` | `string` | yes |
 
 ```json
 {
@@ -799,16 +773,14 @@ Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).
 
 ### LogLineEvent
 
-
-| Field     | Type     | Required |
-| --------- | -------- | -------- |
-| `type`    | `string` | no       |
-| `run_id`  | `string` | yes      |
-| `level`   | `string` | yes      |
-| `source`  | `string` | yes      |
-| `message` | `string` | yes      |
-| `ts`      | `string` | yes      |
-
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `level` | `string` | yes |
+| `source` | `string` | yes |
+| `message` | `string` | yes |
+| `ts` | `string` | yes |
 
 ```json
 {
@@ -867,13 +839,10 @@ Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).
 
 ## Error Codes
 
-
-| Code   | Name             | Meaning                               |
-| ------ | ---------------- | ------------------------------------- |
-| -32700 | Parse Error      | Invalid JSON received                 |
-| -32600 | Invalid Request  | Missing required JSON-RPC fields      |
-| -32601 | Method Not Found | Unknown method                        |
-| -32602 | Invalid Params   | Parameter validation failed           |
-| -32603 | Internal Error   | Handler raised an unhandled exception |
-
-
+| Code | Name | Meaning |
+|------|------|---------|
+| -32700 | Parse Error | Invalid JSON received |
+| -32600 | Invalid Request | Missing required JSON-RPC fields |
+| -32601 | Method Not Found | Unknown method |
+| -32602 | Invalid Params | Parameter validation failed |
+| -32603 | Internal Error | Handler raised an unhandled exception |
