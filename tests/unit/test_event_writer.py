@@ -79,7 +79,6 @@ async def test_event_writer_subscribe_via_bus(tmp_path: Path) -> None:
 # 功能：未打开文件时 handle 可直接返回。
 # 设计：只构造对象，不进入 async with，覆盖空句柄路径。
 async def test_event_writer_handle_when_not_open_is_noop(tmp_path: Path) -> None:
-    # handle() 在未打开时应静默返回，不抛出异常
     writer = EventWriter(tmp_path / "events.jsonl")
     event = RunStartedEvent(run_id="r1", goal="g", ts="2026-05-11T00:00:00Z")
     await writer.handle(event)  # _file is None, should not raise

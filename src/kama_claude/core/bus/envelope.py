@@ -19,7 +19,12 @@ class JsonRpcRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-# 成功响应：id 对应请求；result 暂不限定业务结构，客户端再校验为 PongResult。
+# 事件无需请求 ID，用 kind=event 区分；嵌套 event 的 type 才是 run.started 等业务名称。
+class EventPushEnvelope(BaseModel):
+    kind: Literal["event"] = "event"
+    event: dict[str, Any]  # Event.model_dump() 的序列化结果
+
+
 class JsonRpcSuccess(BaseModel):
     jsonrpc: Literal["2.0"] = "2.0"
     id: str

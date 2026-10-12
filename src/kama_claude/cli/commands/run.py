@@ -1,4 +1,4 @@
-# S1 的 run 命令直接在当前 CLI 进程执行 AgentRunner，不经过 core 的 TCP 服务。
+# S2 的 run 命令作为 TCP 客户端提交目标；AgentRunner 在独立 core 进程执行。
 
 from __future__ import annotations
 
@@ -6,25 +6,14 @@ import asyncio
 import json
 import sys
 import time
+from typing import Any
 
-from pydantic import BaseModel
-
-from kama_claude.core.bus.events import (
-    LlmTokenEvent,
-    RunFinishedEvent,
-    RunStartedEvent,
-    StepFinishedEvent,
-    StepStartedEvent,
-    ToolCallFailedEvent,
-    ToolCallFinishedEvent,
-    ToolCallStartedEvent,
-)
 from kama_claude.core.config import KamaConfig
-from kama_claude.core.runner import AgentRunner
+from kama_claude.core.transport.socket_client import IpcError, SocketClient
 
 
 class StdoutPrinter:
-    # 订阅事件总线并将运行进度格式化打印到终端
+    # 接收 dict 格式的事件并将运行进度格式化打印到终端
     def __init__(self) -> None:
         # 实例属性记住是否正在输出同一行模型文本；不同打印器实例分别维护状态。
         self._inline = False  # True while LLM tokens are mid-line
@@ -36,60 +25,112 @@ class StdoutPrinter:
             print()
             self._inline = False
 
-    # 事件订阅回调；总线传入 BaseModel，下面再按具体子类读取对应字段。
-    # 函数虽然标为 async，内部 print 仍是同步终端输出。
-    async def handle(self, event: BaseModel) -> None:
-        # isinstance 按事件模型类型分支，同一个订阅函数可接收多种事件。
-        if isinstance(event, RunStartedEvent):
-            # 收到任务开始事件时记录单调时间，任务结束时用差值显示持续秒数。
+    # 根据事件 type 字段分发并格式化打印到 stdout/stderr
+    async def handle(self, event: dict[str, Any]) -> None:
+        # JSON 反序列化得到 dict，因此按 type 字符串分支，不能再用 isinstance 事件类。
+        t = event.get("type", "")
+
+        if t == "run.started":
             self._run_start = time.monotonic()
-            print(f"[run] {event.run_id}")
+            print(f"[run] {event.get('run_id', '')}")
 
-        elif isinstance(event, StepStartedEvent):
+        elif t == "step.started":
             self._ensure_newline()
-            print(f"[step {event.step}] planning...")
+            print(f"[step {event.get('step')}] planning...")
 
-        elif isinstance(event, LlmTokenEvent):
-            # end="" 不自动换行，flush=True 及时刷新终端，形成流式输出。
-            print(event.token, end="", flush=True)
+        elif t == "llm.token":
+            # end 不换行，flush 立即刷新终端缓冲；连续文本片段拼成同一行。
+            print(event.get("token", ""), end="", flush=True)
             self._inline = True
 
-        elif isinstance(event, ToolCallStartedEvent):
+        elif t == "tool.call_started":
             self._ensure_newline()
-            # ensure_ascii=False 保留可读中文；结果仍然是 JSON 字符串。
-            params_str = json.dumps(event.params, ensure_ascii=False)
-            print(f"[tool] {event.tool_name} {params_str}")
+            params_str = json.dumps(event.get("params", {}), ensure_ascii=False)
+            print(f"[tool] {event.get('tool_name', '')} {params_str}")
 
-        elif isinstance(event, ToolCallFinishedEvent):
-            print(f"[tool] {event.tool_name} ✓  {event.elapsed_ms}ms")
+        elif t == "tool.call_finished":
+            print(f"[tool] {event.get('tool_name', '')} ✓  {event.get('elapsed_ms')}ms")
 
-        elif isinstance(event, ToolCallFailedEvent):
+        elif t == "tool.call_failed":
             print(
-                f"[tool] {event.tool_name} ✗  {event.error_message}",
-                # 把工具失败信息送到标准错误流；重定向 stdout 时可与正常输出分开。
+                f"[tool] {event.get('tool_name', '')} ✗  {event.get('error_message', '')}",
                 file=sys.stderr,
             )
 
-        elif isinstance(event, StepFinishedEvent):
+        elif t == "step.finished":
             self._ensure_newline()
-            print(f"[step {event.step}] done")
+            print(f"[step {event.get('step')}] done")
 
-        elif isinstance(event, RunFinishedEvent):
+        elif t == "run.finished":
             self._ensure_newline()
             # elapsed 的单位为秒；下面 f 字符串中的 :.1f 保留一位小数。
             elapsed = time.monotonic() - self._run_start
-            print(f"[run] {event.status}  {event.steps} steps  {elapsed:.1f}s")
+            print(f"[run] {event.get('status', '')}  {event.get('steps')} steps  {elapsed:.1f}s")
+
+
+# 异步核心：连接 daemon，订阅事件，触发 run，等待 run.finished
+async def _run_async(goal: str, config: KamaConfig) -> int:
+    client = SocketClient(config.host, config.port)
+    try:
+        await client.connect()
+    except (ConnectionRefusedError, OSError):
+        print(f"error: core not running ({config.host}:{config.port})", file=sys.stderr)
+        return 1
+
+    printer = StdoutPrinter()
+    # Event 是一次完成通知；收到 run.finished 时 set，主协程在 wait 处恢复。
+    finished = asyncio.Event()
+    exit_code = 0
+
+    async def on_event(event: dict[str, Any]) -> None:
+        # nonlocal 让赋值修改外层局部变量；没有它会创建回调自己的 exit_code。
+        nonlocal exit_code
+        await printer.handle(event)
+        if event.get("type") == "run.finished":
+            if event.get("status") != "success":
+                exit_code = 1
+            finished.set()
+
+    client.on_event(on_event)
+    # 接收循环与当前协程协作运行，否则 send_command 等不到 Future 被填入结果。
+    loop_task = asyncio.create_task(client.run_event_loop())
+
+    try:
+        # 先订阅再提交目标，否则可能错过任务很快发布的 run.started/finished。
+        # S2 使用 global 订阅，事件回调没有按返回的 run_id 再过滤。
+        await client.send_command(
+            "event.subscribe",
+            {
+                "topics": ["run.*", "step.*", "tool.*", "llm.token", "llm.usage"],
+                "scope": "global",
+            },
+        )
+        await client.send_command("agent.run", {"goal": goal})
+    except IpcError as e:
+        print(f"error: {e}", file=sys.stderr)
+        loop_task.cancel()
+        await client.close()
+        return 1
+
+    # agent.run 的 RPC 响应只表示任务已提交；真正完成由 run.finished 通知。
+    # S2 此处未与断线任务竞争等待，运行途中断线可能一直等到用户 Ctrl+C。
+    await finished.wait()
+
+    # cancel 只请求取消；await 让任务有机会执行 finally 并完成退出。
+    loop_task.cancel()
+    try:
+        await loop_task
+    except asyncio.CancelledError:
+        pass
+
+    await client.close()
+    return exit_code
 
 
 # 执行 kama run --goal "..." 命令
 def cmd_run(goal: str, config: KamaConfig) -> None:
-    # 每次命令创建新的打印器，避免继承前一次任务的输出状态。
-    printer = StdoutPrinter()
-    # 传入绑定方法而非调用结果；Runner 将它订阅到本次任务的事件总线。
-    runner = AgentRunner(config, extra_handlers=[printer.handle])
     try:
-        # runner.run(goal) 先生成协程对象，再由 asyncio.run 创建事件循环并驱动执行。
-        asyncio.run(runner.run(goal))
-    # Ctrl+C 在同步入口表现为 KeyboardInterrupt；130 是这里约定的退出码。
+        exit_code = asyncio.run(_run_async(goal, config))
     except KeyboardInterrupt:
         sys.exit(130)
+    sys.exit(exit_code)

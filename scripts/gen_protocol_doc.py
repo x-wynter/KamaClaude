@@ -9,7 +9,15 @@ import json
 import sys
 from pathlib import Path
 
-from kama_claude.core.bus.commands import PingCommand, PongResult
+from kama_claude.core.bus.commands import (
+    AgentRunCommand,
+    AgentRunResult,
+    EventSubscribeCommand,
+    EventSubscribeResult,
+    PingCommand,
+    PongResult,
+)
+from kama_claude.core.bus.envelope import EventPushEnvelope
 from kama_claude.core.bus.events import (
     CoreStartedEvent,
     LlmModelSelectedEvent,
@@ -61,9 +69,11 @@ def _model_section(name: str, model: type, example: dict | None = None) -> str: 
     return f"### {name}\n{table}{schema_block}{example_block}"
 
 
-# 汇总协议说明、模型小节和示例，返回完整文档字符串。
+# 生成完整的 WIRE_PROTOCOL.md 文档字符串
 def generate() -> str:
-    # 示例是手写的完整请求，Schema 来自业务模型；两者所处协议层次不同。
+    run_id = "20260516-100000-abc123"
+    ts = "2026-05-16T10:00:00.001Z"
+
     ping_req_example = {
         "jsonrpc": "2.0",
         "id": "u-1",
@@ -74,15 +84,46 @@ def generate() -> str:
         "jsonrpc": "2.0",
         "id": "u-1",
         "result": {
-            "server_version": "0.0.1",
+            "server_version": "0.2.0",
             "uptime_ms": 12,
-            "received_at": "2026-05-11T07:31:14.022Z",
+            "received_at": ts,
         },
     }
-
-    # 用列表保存各段文字，最后统一拼接；此处仅构造字符串，没有文件操作。
-    run_id = "20260511-161020-abc123"
-    ts = "2026-05-11T16:10:20.001Z"
+    agent_run_req_example = {
+        "jsonrpc": "2.0",
+        "id": "u-2",
+        "method": "agent.run",
+        "params": {"goal": "总结 README.md 的主要章节"},
+    }
+    agent_run_resp_example = {
+        "jsonrpc": "2.0",
+        "id": "u-2",
+        "result": {"run_id": run_id},
+    }
+    subscribe_req_example = {
+        "jsonrpc": "2.0",
+        "id": "u-3",
+        "method": "event.subscribe",
+        "params": {
+            "topics": ["run.*", "step.*", "tool.*", "llm.token"],
+            "scope": "global",
+            "replay_from_run": None,
+        },
+    }
+    subscribe_resp_example = {
+        "jsonrpc": "2.0",
+        "id": "u-3",
+        "result": {"subscription_id": "sub-abc123", "replayed_count": 0},
+    }
+    event_push_example = {
+        "kind": "event",
+        "event": {
+            "type": "step.started",
+            "run_id": run_id,
+            "step": 1,
+            "ts": ts,
+        },
+    }
 
     sections = [
         "# Wire Protocol\n\n",
@@ -90,16 +131,28 @@ def generate() -> str:
         "## Transport\n\n",
         "- TCP loopback `127.0.0.1:7437` (override via `KAMA_HOST` / `KAMA_PORT`)\n",
         "- Each message is one `\\n`-terminated JSON line (NDJSON)\n",
-        "- Commands use JSON-RPC 2.0; Events use a custom `kind=event` envelope\n\n",
+        "- Commands use JSON-RPC 2.0 (client → server); Events use `kind=event` envelope (server → client)\n\n",
         "## Commands\n\n",
+        "All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params` is used for routing.\n\n",
         _model_section("PingCommand", PingCommand, ping_req_example),
         "\n",
         _model_section("PongResult", PongResult, pong_resp_example),
+        "\n",
+        _model_section("AgentRunCommand", AgentRunCommand, agent_run_req_example),
+        "\n",
+        _model_section("AgentRunResult", AgentRunResult, agent_run_resp_example),
+        "\n",
+        _model_section("EventSubscribeCommand", EventSubscribeCommand, subscribe_req_example),
+        "\n",
+        _model_section("EventSubscribeResult", EventSubscribeResult, subscribe_resp_example),
+        "\n## Server Push\n\n",
+        "Events pushed from daemon to subscribed clients over the same TCP connection.\n\n",
+        _model_section("EventPushEnvelope", EventPushEnvelope, event_push_example),
         "\n## IPC Events\n\n",
         "Events sent over the IPC socket (daemon → client).\n\n",
         _model_section("CoreStartedEvent", CoreStartedEvent),
         "\n## Run Events\n\n",
-        "Events written to `runs/<run_id>/events.jsonl` (and forwarded over IPC in S2+).\n\n",
+        "Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscribed clients.\n\n",
         _model_section("RunStartedEvent", RunStartedEvent,
             {"type": "run.started", "run_id": run_id, "goal": "总结 README.md", "ts": ts}),
         "\n",
@@ -148,6 +201,7 @@ def generate() -> str:
         "| -32601 | Method Not Found | Unknown method |\n",
         "| -32602 | Invalid Params | Parameter validation failed |\n",
         "| -32603 | Internal Error | Handler raised an unhandled exception |\n",
+        "| -32000 | Application Error | e.g. another run already in progress |\n",
     ]
     # 空字符串作分隔符，把所有段落按顺序连接。
     return "".join(sections)

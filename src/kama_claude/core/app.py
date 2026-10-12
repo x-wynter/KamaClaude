@@ -1,10 +1,12 @@
-# core 守护进程的生命周期：初始化 → 注册 ping 处理器 → 监听 TCP → 等待退出。
+# core 守护进程的生命周期：初始化 → 注册命令和事件广播 → 监听 TCP → 等待退出。
 # 业务处理由 CoreApp 管理，网络收发交给 SocketServer。
 
 from __future__ import annotations
 
 import asyncio
 import datetime
+import fnmatch
+import json
 import logging
 import signal
 import time
@@ -13,10 +15,21 @@ from types import FrameType
 from typing import Any
 
 import kama_claude
-from kama_claude.core.bus.commands import PongResult
-from kama_claude.core.config import get_config
+from kama_claude.core.bus.commands import (
+    AgentRunCommand,
+    AgentRunResult,
+    EventSubscribeCommand,
+    EventSubscribeResult,
+    PongResult,
+)
+from kama_claude.core.bus.envelope import EventPushEnvelope
+from kama_claude.core.config import KamaConfig, get_config
+from kama_claude.core.events.bus import EventBus
 from kama_claude.core.logging_setup import setup_logging
-from kama_claude.core.transport.socket_server import SocketServer
+from kama_claude.core.runner import AgentRunner
+from kama_claude.core.runs import events_file, new_run_id
+from kama_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
+from kama_claude.core.transport.socket_server import SocketServer, get_connection_writer
 
 # __name__ 是当前模块名；日志器以模块命名，便于定位消息来源。
 logger = logging.getLogger(__name__)
@@ -63,6 +76,12 @@ class CoreApp:
     # 初始化实例并记录单调时钟起点；self 表示当前 CoreApp 对象。
     def __init__(self) -> None:
         self._start_time = time.monotonic()
+        # 总线属于 daemon，可由多次 run 共用；广播器是其中一个订阅者。
+        self._bus = EventBus()
+        self._broadcaster = IpcEventBroadcaster()
+        self._bus.subscribe(self._broadcaster.handle)
+        self._current_run_task: asyncio.Task[None] | None = None
+        self._config: KamaConfig | None = None
 
     # 处理 core.ping 请求，返回服务版本、运行时长和接收时间
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
@@ -78,20 +97,89 @@ class CoreApp:
             received_at=datetime.datetime.now(datetime.UTC).isoformat(),
         )
 
+    # 启动一次 agent run：立即返回 run_id，后台 task 执行 runner.run()
+    async def _agent_run_handler(self, params: dict[str, Any]) -> AgentRunResult:
+        # run 已加载配置才会接收命令；assert 同时帮助类型检查器排除 None。
+        assert self._config is not None
+        cmd = AgentRunCommand.model_validate(params)
+
+        # S2 同时只接受一个任务；done 区分仍运行与已经结束的 Task。
+        if self._current_run_task is not None and not self._current_run_task.done():
+            raise RuntimeError("a run is already in progress")
+
+        run_id = new_run_id()
+        runner = AgentRunner(self._config, bus=self._bus)
+        # create_task 调度后台协程，处理器立即返回 ID；这里没有 await 整个任务。
+        # 后台任务与 TCP 处理器仍在同一个 daemon 进程、同一个事件循环中。
+        self._current_run_task = asyncio.create_task(
+            runner.run(cmd.goal, run_id=run_id)
+        )
+        return AgentRunResult(run_id=run_id)
+
+    # 注册客户端事件订阅，可选先回放 events.jsonl 历史再接收实时流
+    async def _subscribe_handler(self, params: dict[str, Any]) -> EventSubscribeResult:
+        cmd = EventSubscribeCommand.model_validate(params)
+        # 处理器只接收 params，通过 ContextVar 取得当前请求所属连接的写流。
+        writer = get_connection_writer()
+
+        replayed_count = 0
+        # 先发送历史再注册实时订阅；S2 没有用序号保证两者切换时无缝且不重复。
+        if cmd.replay_from_run is not None:
+            replayed_count = await self._replay_events(
+                cmd.replay_from_run, writer, cmd.topics
+            )
+
+        sub_id = self._broadcaster.subscribe(writer, cmd.topics, cmd.scope)
+        return EventSubscribeResult(subscription_id=sub_id, replayed_count=replayed_count)
+
+    # 从 events.jsonl 向 writer 回放匹配 topic 的历史事件，返回已回放条数
+    async def _replay_events(
+        self,
+        run_id: str,
+        writer: asyncio.StreamWriter,
+        topics: list[str],
+    ) -> int:
+        path = events_file(run_id)
+        if not path.exists():
+            return 0
+
+        count = 0
+        # 文件由 EventWriter 以 UTF-8 写入，读取必须使用同一编码，尤其是 Windows。
+        # splitlines 去掉换行；json.loads 将每行恢复为普通事件字典。
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            event_type: str = event.get("type", "")
+            # 历史回放在这里按 topic 过滤；实时广播还会检查 scope。
+            if not any(fnmatch.fnmatch(event_type, p) for p in topics):
+                continue
+            envelope = EventPushEnvelope(event=event)
+            writer.write(envelope.model_dump_json().encode() + b"\n")
+            count += 1
+
+        if count:
+            await writer.drain()
+        return count
+
     # 启动守护进程：加载配置、初始化日志、启动 TCP 服务器，并等待退出信号
     async def run(self) -> None:
         self._start_time = time.monotonic()
-        config = get_config()
-        setup_logging(config)
+        self._config = get_config()
+        setup_logging(self._config)
 
-        server = SocketServer(config.host, config.port)
-        # 传入绑定方法 self._ping_handler，而不是调用它；服务端收到请求后才执行。
+        server = SocketServer(self._config.host, self._config.port, self._broadcaster)
         server.register("core.ping", self._ping_handler)
+        server.register("agent.run", self._agent_run_handler)
+        server.register("event.subscribe", self._subscribe_handler)
 
         # await 等待监听启动完成；已有连接的处理由事件循环继续调度。
         addr = await server.start()
         logger.info("kama-core %s listening addr=%s", kama_claude.__version__, addr)
-        logger.info("config: %s", config)
+        logger.info("config: %s", self._config)
 
         try:
             await _wait_for_shutdown()

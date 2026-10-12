@@ -179,3 +179,30 @@ async def test_run_id_embedded_in_started_event(tmp_path: Path) -> None:
     finished = next(e for e in events if e.type == "run.finished")  # type: ignore[attr-defined]
     assert started.run_id == finished.run_id  # type: ignore[attr-defined]
     assert len(started.run_id) > 0  # type: ignore[attr-defined]
+
+
+# 功能：验证注入外部 EventBus 时，runner 使用该 bus 而不自建，外部订阅者能收到所有事件
+# 设计：显式传入 EventBus 实例并订阅收集器，确认 runner 不再内部新建 bus（否则外部订阅者收不到事件）；
+#       这是 CoreApp 注入全局 bus 的核心行为，单元测试级别验证可避免集成测试的守护进程依赖
+async def test_injected_bus_receives_events(tmp_path: Path) -> None:
+    from kama_claude.core.events.bus import EventBus
+
+    external_bus = EventBus()
+    collected: list[object] = []
+
+    async def collect(e: object) -> None:
+        collected.append(e)
+
+    external_bus.subscribe(collect)
+
+    runner = AgentRunner(
+        _config(),
+        bus=external_bus,
+        provider=_EndTurnProvider(),  # type: ignore[arg-type]
+        runs_dir=tmp_path,
+    )
+    await runner.run("goal")
+
+    types = [e.type for e in collected]  # type: ignore[attr-defined]
+    assert "run.started" in types
+    assert "run.finished" in types

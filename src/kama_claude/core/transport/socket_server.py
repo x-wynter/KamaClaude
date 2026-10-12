@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -20,6 +21,7 @@ from kama_claude.core.bus.envelope import (
     JsonRpcSuccess,
     make_error,
 )
+from kama_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -27,18 +29,29 @@ logger = logging.getLogger(__name__)
 # 这里表示：接收一个字典，返回可以 await 的对象；最终结果类型不限。
 type CommandHandler = Callable[[dict[str, Any]], Awaitable[Any]]
 
+# ContextVar 保存协程上下文中的 writer；不同连接 Task 不会像全局变量那样互相覆盖。
+# 它让 handler(params) 接口保持不变，同时能向当前连接推送订阅事件。
+_writer_var: ContextVar[asyncio.StreamWriter] = ContextVar("_writer_var")
+
+
+# 返回当前 handler 调用所属连接的 StreamWriter
+def get_connection_writer() -> asyncio.StreamWriter:
+    return _writer_var.get()
+
 _MAX_LINE_BYTES = 1 * 1024 * 1024  # 1 MB per frame
 
 
 class SocketServer:
-    # 保存监听地址和实例状态，尚未建立任何网络连接。
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(
+        self, host: str, port: int, broadcaster: IpcEventBroadcaster | None = None
+    ) -> None:
         self._host = host
         self._port = port
         # 字典将方法名映射到处理函数；下划线表示内部属性，并不是强制私有。
         self._handlers: dict[str, CommandHandler] = {}
         # | None 表示尚未启动时可以为空，启动后保存 asyncio 的服务器对象。
         self._server: asyncio.AbstractServer | None = None
+        self._broadcaster = broadcaster
 
     # 注册一个方法名对应的命令处理函数
     def register(self, method: str, handler: CommandHandler) -> None:
@@ -90,6 +103,8 @@ class SocketServer:
             await self._read_loop(reader, writer)
         # 即使读取或处理请求时出错，也进入 finally，尝试关闭当前客户端写流。
         finally:
+            if self._broadcaster is not None:
+                self._broadcaster.unsubscribe(writer)
             writer.close()
             try:
                 await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
@@ -146,6 +161,8 @@ class SocketServer:
             )
             return
 
+        # 在 await handler 前设置上下文，handler 内的 get_connection_writer 可取到它。
+        _writer_var.set(writer)
         try:
             # 调用注册的业务函数并等待结果；参数是已解析的 params 字典。
             result = await handler(req.params)

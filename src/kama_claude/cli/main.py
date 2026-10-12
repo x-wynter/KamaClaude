@@ -1,5 +1,5 @@
 # 学习入口：把终端参数转换成 Python 属性，再调用版本、ping 或 run 功能。
-# ping 走 TCP；run 在当前进程调用 AgentRunner，两者共用配置和日志初始化。
+# S2 的 ping 和 run 都通过 TCP 访问 daemon；core 子命令管理后台进程。
 
 # 推迟类型注解的求值；注解用于说明类型，不会自动检查传入的值。
 from __future__ import annotations
@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from kama_claude.cli.commands.core import cmd_core_start, cmd_core_status, cmd_core_stop
 from kama_claude.cli.commands.ping import cmd_ping
 from kama_claude.cli.commands.run import cmd_run
 from kama_claude.cli.commands.version import cmd_version
@@ -33,6 +34,13 @@ def main() -> None:
     run_parser = subparsers.add_parser("run", help="Run an agent task")
     run_parser.add_argument("--goal", required=True, help="Goal for the agent to accomplish")
 
+    core_parser = subparsers.add_parser("core", help="Manage the core daemon")
+    # 二级子命令：args.command 是 core，args.core_command 是 start/stop/status。
+    core_sub = core_parser.add_subparsers(dest="core_command")
+    core_sub.add_parser("start", help="Start the daemon in the background")
+    core_sub.add_parser("stop", help="Stop the running daemon")
+    core_sub.add_parser("status", help="Show daemon status")
+
     args = parser.parse_args()
 
     # 先处理版本开关；return 结束当前函数，避免继续进入下面的命令分支。
@@ -47,6 +55,16 @@ def main() -> None:
         cmd_ping(config)
     elif args.command == "run":
         cmd_run(args.goal, config)
+    elif args.command == "core":
+        if args.core_command == "start":
+            cmd_core_start(config)
+        elif args.core_command == "stop":
+            cmd_core_stop(config)
+        elif args.core_command == "status":
+            cmd_core_status(config)
+        else:
+            core_parser.print_help()
+            sys.exit(1)
     else:
         # 没有提供子命令时 command 为 None，进入此分支。
         parser.print_help()

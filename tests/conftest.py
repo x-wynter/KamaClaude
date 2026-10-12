@@ -52,7 +52,8 @@ async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[byte
     proc = subprocess.Popen([sys.executable, "-m", "kama_claude.core"], env=env)
 
     # 计算启动截止时刻；轮询真实连接成功与否，避免仅凭固定延时判断就绪。
-    deadline = time.monotonic() + 3.0
+    # S2 会额外导入模型 SDK；Windows 冷启动可能接近 3 秒，给 10 秒上限。
+    deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         # 异步等待 0.05 秒，期间让事件循环处理其他任务。
         await asyncio.sleep(0.05)
@@ -67,7 +68,7 @@ async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[byte
     else:
         proc.terminate()
         proc.wait()
-        pytest.fail("Daemon did not start within 3 seconds")
+        pytest.fail("Daemon did not start within 10 seconds")
 
     # 暂停夹具并运行使用它的测试；测试结束后恢复执行下面的进程清理。
     yield proc

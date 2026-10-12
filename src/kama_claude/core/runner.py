@@ -31,6 +31,7 @@ class AgentRunner:
         config: KamaConfig,
         # 星号之后的参数必须按名称传入；测试可注入假 provider，避免真实 API 调用。
         *,
+        bus: EventBus | None = None,
         provider: LLMProvider | None = None,
         extra_handlers: list[EventHandler] | None = None,
         runs_dir: Path | None = None,
@@ -38,51 +39,48 @@ class AgentRunner:
         # 这里只保存依赖，不启动模型请求；真正执行入口是下面的 run。
         # self._config 的下划线表示内部属性约定，不是 Python 强制私有。
         self._config = config
+        self._bus = bus
         self._provider = provider
         # extra_handlers 可传 None；or [] 给本实例一个空列表。
         # 若传入非空列表则保存原列表引用，不会自动复制其中的回调。
         self._extra_handlers: list[EventHandler] = extra_handlers or []
         self._runs_dir = runs_dir or RUNS_DIR
 
-    # 执行一次完整的 agent run：生成 run_id、接线事件总线、驱动 AgentLoop
-    async def run(self, goal: str) -> None:
-        # 每次调用 run 都生成新的任务 ID；同一个 Runner 可以顺序执行多次任务。
-        run_id = new_run_id()
+    # 执行一次完整的 agent run：接线事件总线、驱动 AgentLoop、写 events.jsonl
+    async def run(self, goal: str, *, run_id: str | None = None) -> None:
+        # daemon 先生成 ID 再调度本协程；独立使用 Runner 时仍可自动生成 ID。
+        run_id = run_id or new_run_id()
         run_path = self._runs_dir / run_id
         # Path 的 / 拼接目录；parents=True 补齐父目录，exist_ok=True 接受已有目录。
         run_path.mkdir(parents=True, exist_ok=True)
 
-        # 每次任务使用独立总线，避免不同任务的打印器和文件订阅混在一起。
-        bus = EventBus()
-        # h 是异步函数对象，如 printer.handle；subscribe 只是保存它，还没有调用。
+        # 与 S1 不同，允许注入 daemon 的公共总线，让广播器收到此次任务事件。
+        # 不注入时仍创建独立总线，便于单元测试。
+        bus = self._bus if self._bus is not None else EventBus()
         for h in self._extra_handlers:
             bus.subscribe(h)
 
-        # 未注入 provider 时才创建真实客户端；or 返回第一个真值对象。
-        provider = self._provider or AnthropicProvider(self._config.llm.default_model)
-        # S1 只注册 read_file；模型只能看到下面注册表导出的工具说明。
-        registry = ToolRegistry()
-        registry.register(ReadFileTool())
-        # 这是项目的业务循环对象，不是 asyncio 的底层事件循环。
-        # 把同一 provider、registry 和 bus 交给它，后续由它协调调用。
-        loop = AgentLoop(provider, registry, bus)
-
-        # 构造上下文时 __post_init__ 自动把 goal 放入第一条 user 消息。
-        # max_steps 来自配置；计数和状态由 AgentLoop 修改。
+        # 上下文仍按任务创建；共享总线不等于共享模型消息历史。
         context = ExecutionContext(
             run_id=run_id,
             goal=goal,
             max_steps=self._config.agent.max_steps,
         )
 
-        # async with 进入时打开文件，退出时关闭；writer 与终端打印器订阅同一总线。
+        # async with 管理事件文件；IPC 广播器和文件 writer 订阅同一进程内总线。
         async with EventWriter(run_path / "events.jsonl") as writer:
             # 先登记文件订阅者，再发布开始事件，确保第一条记录就能写入文件。
             writer.subscribe(bus)
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
 
-            # 用局部标记把取消异常延后到文件关闭之后重新抛出。
-            # 这里专门处理取消，并不是兜底捕获所有异常。
+            # S2 将依赖创建放在 run.started 之后；测试可以先观察到任务已启动。
+            # 这里只注册 read_file；AgentLoop 仍沿用 S1 的模型—工具循环。
+            provider = self._provider or AnthropicProvider(self._config.llm.default_model)
+            registry = ToolRegistry()
+            registry.register(ReadFileTool())
+            loop = AgentLoop(provider, registry, bus)
+
+            # 暂存取消状态，写完结束事件并关闭文件后再向调用方抛出取消异常。
             cancelled = False
             try:
                 await loop.run(context)
