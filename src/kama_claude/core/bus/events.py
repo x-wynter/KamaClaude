@@ -110,7 +110,7 @@ class LogLineEvent(BaseModel):
 
 
 # 根据 type 字段决定事件类型的判别联合
-# Annotated 附加按 type 判别的元数据；当前只有一个事件模型，并非多成员联合。
+# Annotated 附加按 type 判别的元数据；S1 已有多种事件，解析时按 type 选择具体模型。
 Event = Annotated[
     CoreStartedEvent
     | RunStartedEvent

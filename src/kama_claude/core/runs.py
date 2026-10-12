@@ -1,5 +1,5 @@
 # 运行记录的路径约定：根据 run_id 计算目录和 events.jsonl 的位置。
-# 这里仅构造路径，不创建目录、不读写文件；当前 ping 流程未调用这些函数。
+# S1 增加任务 ID 和目录创建；Runner 使用 RUNS_DIR 与 new_run_id 组织运行记录。
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ def events_file(run_id: str) -> Path:
 # 生成格式为 YYYYMMDD-HHMMSS-xxxxxx 的唯一 run ID
 def new_run_id() -> str:
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    # 随机 UUID 转十六进制后取前六位，降低同秒命名冲突概率，但不是绝对唯一保证。
     suffix = uuid.uuid4().hex[:6]
     return f"{ts}-{suffix}"
 

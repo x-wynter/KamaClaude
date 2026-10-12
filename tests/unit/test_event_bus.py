@@ -1,3 +1,5 @@
+# 事件总线测试：用局部异步回调收集事件，验证调用顺序与对象引用。
+
 from __future__ import annotations
 
 from pydantic import BaseModel

@@ -1,3 +1,5 @@
+# S1 的 run 命令直接在当前 CLI 进程执行 AgentRunner，不经过 core 的 TCP 服务。
+
 from __future__ import annotations
 
 import asyncio
@@ -33,6 +35,7 @@ class StdoutPrinter:
             self._inline = False
 
     async def handle(self, event: BaseModel) -> None:
+        # isinstance 按事件模型类型分支，同一个订阅函数可接收多种事件。
         if isinstance(event, RunStartedEvent):
             self._run_start = time.monotonic()
             print(f"[run] {event.run_id}")
@@ -42,11 +45,13 @@ class StdoutPrinter:
             print(f"[step {event.step}] planning...")
 
         elif isinstance(event, LlmTokenEvent):
+            # end="" 不自动换行，flush=True 及时刷新终端，形成流式输出。
             print(event.token, end="", flush=True)
             self._inline = True
 
         elif isinstance(event, ToolCallStartedEvent):
             self._ensure_newline()
+            # ensure_ascii=False 保留可读中文；结果仍然是 JSON 字符串。
             params_str = json.dumps(event.params, ensure_ascii=False)
             print(f"[tool] {event.tool_name} {params_str}")
 
@@ -72,8 +77,10 @@ class StdoutPrinter:
 # 执行 kama run --goal "..." 命令
 def cmd_run(goal: str, config: KamaConfig) -> None:
     printer = StdoutPrinter()
+    # 传入绑定方法而非调用结果；Runner 将它订阅到本次任务的事件总线。
     runner = AgentRunner(config, extra_handlers=[printer.handle])
     try:
         asyncio.run(runner.run(goal))
+    # Ctrl+C 在同步入口表现为 KeyboardInterrupt；130 是这里约定的退出码。
     except KeyboardInterrupt:
         sys.exit(130)

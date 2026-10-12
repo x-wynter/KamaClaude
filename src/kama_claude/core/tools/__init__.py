@@ -1,3 +1,4 @@
+# 工具契约与注册表的导出入口。
 from kama_claude.core.tools.base import BaseTool, ToolResult
 from kama_claude.core.tools.invocation import invoke_tool
 from kama_claude.core.tools.registry import ToolRegistry

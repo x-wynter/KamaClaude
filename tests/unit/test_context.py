@@ -1,3 +1,5 @@
+# 上下文单元测试：直接检查消息列表与状态，不调用模型或网络。
+
 from __future__ import annotations
 
 from kama_claude.core.context import ExecutionContext

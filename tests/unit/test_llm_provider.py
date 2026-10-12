@@ -1,3 +1,5 @@
+# 适配器测试：FakeStream 和 MagicMock 模拟 SDK，保留流式接口而不访问 API。
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -53,10 +55,12 @@ class FakeStream:
     async def __aexit__(self, *args: object) -> None:
         pass
 
+    # property 让 text_stream 像属性一样读取；返回的仍是异步生成器。
     @property
     def text_stream(self):  # type: ignore[return]
         async def _gen():
             for t in self._texts:
+                # yield 每次交出一段文本，下一次 async for 迭代再继续。
                 yield t
 
         return _gen()

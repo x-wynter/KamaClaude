@@ -1,3 +1,5 @@
+# 工具调用测试：注册小型假工具，分别触发成功、缺参、超时和执行异常。
+
 from __future__ import annotations
 
 import asyncio

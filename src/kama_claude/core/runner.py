@@ -1,3 +1,5 @@
+# 一次任务的组装入口：创建上下文、模型、工具与事件订阅，再驱动 AgentLoop。
+
 from __future__ import annotations
 
 import asyncio
@@ -26,6 +28,7 @@ class AgentRunner:
     def __init__(
         self,
         config: KamaConfig,
+        # 星号之后的参数必须按名称传入；测试可注入假 provider，避免真实 API 调用。
         *,
         provider: LLMProvider | None = None,
         extra_handlers: list[EventHandler] | None = None,
@@ -46,7 +49,9 @@ class AgentRunner:
         for h in self._extra_handlers:
             bus.subscribe(h)
 
+        # 未注入 provider 时才创建真实客户端；or 返回第一个真值对象。
         provider = self._provider or AnthropicProvider(self._config.llm.default_model)
+        # S1 只注册 read_file；模型只能看到下面注册表导出的工具说明。
         registry = ToolRegistry()
         registry.register(ReadFileTool())
         loop = AgentLoop(provider, registry, bus)
@@ -57,6 +62,7 @@ class AgentRunner:
             max_steps=self._config.agent.max_steps,
         )
 
+        # async with 进入时打开文件，退出时关闭；writer 与终端打印器订阅同一总线。
         async with EventWriter(run_path / "events.jsonl") as writer:
             writer.subscribe(bus)
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
@@ -64,6 +70,7 @@ class AgentRunner:
             cancelled = False
             try:
                 await loop.run(context)
+            # 先记录取消状态并发布 run.finished，再向上重新抛出取消异常。
             except asyncio.CancelledError:
                 cancelled = True
                 if not context.is_done():
@@ -79,5 +86,6 @@ class AgentRunner:
                 )
             )
 
+        # 保留取消语义，不能把取消悄悄当作正常返回。
         if cancelled:
             raise asyncio.CancelledError()

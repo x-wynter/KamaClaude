@@ -1,3 +1,5 @@
+# 组装测试：注入假 provider，检查完整任务事件与落盘文件，不请求真实模型。
+
 from __future__ import annotations
 
 import json

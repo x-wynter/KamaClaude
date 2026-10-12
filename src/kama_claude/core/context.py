@@ -1,3 +1,5 @@
+# 任务上下文：保存对话历史、当前步数、终止状态；本类不调用模型或读写文件。
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -9,12 +11,14 @@ class ExecutionContext:
     run_id: str
     goal: str
     max_steps: int
+    # default_factory 每次创建新列表，防止不同任务共享同一份消息历史。
     messages: list[dict[str, Any]] = field(default_factory=list)
     step: int = 0
     status: str = "running"  # "running" | "success" | "failed"
     reason: str | None = None
 
     # 初始化时将 goal 作为第一条用户消息写入消息历史
+    # dataclass 自动生成的 __init__ 完成字段赋值后会调用此方法。
     def __post_init__(self) -> None:
         if not self.messages:
             self.messages.append({"role": "user", "content": self.goal})
@@ -35,14 +39,18 @@ class ExecutionContext:
         if is_error:
             block["is_error"] = True
 
+        # -1 取最后一个元素；条件表达式避免空列表索引越界。
         last = self.messages[-1] if self.messages else None
+        # and 从左到右短路；先检查存在和类型，再检查每个块，避免错误访问。
         if (
             last is not None
             and last["role"] == "user"
             and isinstance(last["content"], list)
             and last["content"]
+            # all 对生成器逐项判断；显式要求非空，避免 all([]) 为 True 的情况。
             and all(b.get("type") == "tool_result" for b in last["content"])
         ):
+            # last 引用原字典，修改它也就修改了 messages 中的那条消息。
             last["content"].append(block)
         else:
             self.messages.append({"role": "user", "content": [block]})

@@ -1,5 +1,5 @@
-# 学习入口：把终端参数转换成 Python 属性，再调用版本或 ping 功能。
-# 调用链：main → get_config → setup_logging → cmd_ping；协议通信在 commands/ping.py。
+# 学习入口：把终端参数转换成 Python 属性，再调用版本、ping 或 run 功能。
+# ping 走 TCP；run 在当前进程调用 AgentRunner，两者共用配置和日志初始化。
 
 # 推迟类型注解的求值；注解用于说明类型，不会自动检查传入的值。
 from __future__ import annotations

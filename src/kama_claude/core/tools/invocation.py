@@ -1,3 +1,5 @@
+# 工具调用统一入口：开始事件 → 参数检查 → 限时执行 → 成功或失败事件。
+
 from __future__ import annotations
 
 import asyncio
@@ -65,6 +67,7 @@ async def invoke_tool(
         )
     )
 
+    # 闭包读取外层 t0；单调时钟适合计时，不受系统时间调整影响。
     def elapsed() -> int:
         return int((time.monotonic() - t0) * 1000)
 
@@ -75,7 +78,9 @@ async def invoke_tool(
             "runtime_error", f"unknown tool: {tool_call.name}", elapsed(),
         )
 
+    # cast 只告知类型检查器，不转换数据；这里仅检查必填键，不做完整 schema 校验。
     required: list[str] = cast(list[str], tool.input_schema.get("required", []))
+    # 列表推导式收集缺失的参数名，空列表在 if 中为 False。
     missing = [p for p in required if p not in tool_call.input]
     if missing:
         return await _fail(
@@ -84,6 +89,7 @@ async def invoke_tool(
         )
 
     try:
+        # 超时会取消被等待协程并抛 TimeoutError；外层将它转换为工具错误。
         result = await asyncio.wait_for(tool.invoke(dict(tool_call.input)), timeout=timeout)
         ms = elapsed()
         if result.is_error:
@@ -106,6 +112,7 @@ async def invoke_tool(
             bus, run_id, tool_call,
             "timeout", f"tool timed out after {timeout}s", elapsed(),
         )
+    # 不捕获 CancelledError（属于 BaseException），任务取消仍会向上传播。
     except Exception as exc:
         return await _fail(
             bus, run_id, tool_call,

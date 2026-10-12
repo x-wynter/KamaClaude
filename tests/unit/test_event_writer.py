@@ -1,3 +1,5 @@
+# 文件订阅测试：tmp_path 隔离磁盘数据，async with 控制文件打开和关闭。
+
 from __future__ import annotations
 
 import json

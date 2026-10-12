@@ -1,3 +1,5 @@
+# 循环测试：假 provider 按预设顺序返回响应，验证工具反馈与终止条件。
+
 from __future__ import annotations
 
 import asyncio

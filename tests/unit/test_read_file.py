@@ -1,3 +1,5 @@
+# 读文件测试：在临时目录构造输入，覆盖正常内容、缺失、截断和路径检查。
+
 from __future__ import annotations
 
 from pathlib import Path

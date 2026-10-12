@@ -1,3 +1,5 @@
+# 注册表测试：检查名称查找、覆盖和 schema 导出，不执行实际工具。
+
 from __future__ import annotations
 
 from kama_claude.core.tools.base import BaseTool, ToolResult
