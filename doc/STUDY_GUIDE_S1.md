@@ -61,32 +61,47 @@ flowchart LR
 
 ## 2. 整体架构：先认清对象的分工
 
-### 2.1 一张图看清协作关系
+### 2.1 分两张图理解协作关系
+
+先看任务怎样执行，再看执行过程怎样被记录。两张图分别表示同一次运行的两个侧面。
+
+**图 A：任务执行——从上往下读。**
 
 ```mermaid
 flowchart TD
-    CLI[CLI 解析 goal 和配置] --> Runner[AgentRunner 组装一次任务]
-    Runner --> Loop[AgentLoop 驱动轮次]
-    Runner --> Context[ExecutionContext 保存运行状态]
-    Runner --> Registry[ToolRegistry 保存工具实例]
-    Loop -->|传历史与工具说明| Provider[AnthropicProvider]
-    Provider -->|请求与流式响应| API[外部模型服务]
-    Provider -->|返回 LlmResponse| Loop
-    Loop -->|追加回答和工具结果| Context
-    Context -->|下一轮完整历史| Loop
-    Loop --> Invoke[invoke_tool 统一调用入口]
-    Invoke -->|按名称查找| Registry
-    Registry --> Tool[ReadFileTool]
-    Tool --> File[本地文件]
-    Runner -.任务事件.-> Bus[EventBus]
-    Loop -.步骤事件.-> Bus
-    Provider -.模型事件.-> Bus
-    Invoke -.工具事件.-> Bus
-    Bus --> Printer[StdoutPrinter 终端输出]
-    Bus --> Writer[EventWriter 文件记录]
+    CLI["CLI：接收目标与配置"] --> Runner["AgentRunner：组装任务"]
+    Runner --> Loop["AgentLoop：驱动每一轮"]
+    Loop --> Model["模型调用：AnthropicProvider"]
+    Loop --> Tool["工具调用：invoke_tool"]
+    Model --> API["外部模型服务"]
+    Tool --> Read["ReadFileTool：读取本地文件"]
 ```
 
-实线表示调用、返回或数据使用关系；虚线表示发布观察事件。EventBus 不负责执行工具，也不负责把工具结果交给模型。模型能看到工具结果，是因为 Loop 更新了 Context 中的消息历史。
+这张图只画调用方向，返回过程用下面三步理解：
+
+1. Loop 调用 Provider，拿到模型回答或工具请求。
+2. 如果模型请求工具，Loop 调用 invoke_tool，拿到工具结果。
+3. Loop 更新消息历史；需要继续时，再请求下一轮模型。
+
+还有两个辅助对象，不必再用连线塞进主图：
+
+| 辅助对象 | 放在执行流程中怎样理解 |
+|---|---|
+| `ExecutionContext` | 保存目标、消息历史和任务状态；Loop 每轮读取、更新它。 |
+| `ToolRegistry` | 保存工具名称与实例的对应关系；向模型提供工具说明，供 invoke_tool 按名称查找。 |
+
+**图 B：事件记录——把过程送到终端与文件。**
+
+```mermaid
+flowchart TD
+    Source["执行中的模块发布事件"] --> Bus["EventBus：按订阅顺序分发"]
+    Bus --> Printer["StdoutPrinter：终端显示"]
+    Bus --> Writer["EventWriter：写入 JSONL"]
+```
+
+图中的发布者包括 Runner、Loop、Provider 和 invoke_tool，分别发布任务、步骤、模型和工具事件。EventBus 依次等待订阅者处理；图中的分支表示两个接收者，不表示并行执行。
+
+**模型能看到工具结果，是因为 Loop 把结果写入 Context 的消息历史，再发起下一轮请求。** EventBus 负责记录和展示过程，不负责这条反馈路径。具体交互顺序见第 3 节，消息内容如何变化见第 4 节。
 
 ### 2.2 每个模块只记一句话
 
