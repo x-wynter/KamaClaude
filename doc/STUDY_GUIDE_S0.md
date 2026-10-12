@@ -6,20 +6,20 @@
 
 | 顺序 | 文件 | 要理解的问题 |
 |---|---|---|
-| 1 | [入口配置](pyproject.toml) | 安装后为什么可以运行 `kama`、`kama-core`？查看 `[project.scripts]`。 |
-| 2 | [CLI 入口](src/kama_claude/cli/main.py) | 命令行文字如何变成 `args.version`、`args.command`？ |
-| 3 | [配置](src/kama_claude/core/config.py) | 配置对象如何创建？文件和环境变量如何覆盖默认值？ |
-| 4 | [日志](src/kama_claude/core/logging_setup.py) | 日志级别、格式和输出位置分别由谁负责？ |
-| 5 | [ping 客户端](src/kama_claude/cli/commands/ping.py) | 同步函数如何进入异步代码？字典如何通过 TCP 发送？ |
-| 6 | [core 应用](src/kama_claude/core/app.py) | 服务如何启动、注册处理器并响应退出信号？ |
-| 7 | [TCP 服务](src/kama_claude/core/transport/socket_server.py) | 一行数据如何变成方法调用，再变成响应？ |
-| 8 | [协议外壳](src/kama_claude/core/bus/envelope.py) | 请求、成功响应、错误响应各包含什么字段？ |
-| 9 | [命令模型](src/kama_claude/core/bus/commands.py)与[事件模型](src/kama_claude/core/bus/events.py) | Pydantic 如何描述字段和检查数据？哪些定义尚未进入运行链？ |
-| 10 | [路径辅助函数](src/kama_claude/core/runs.py) | `Path` 的 `/` 为什么能拼接路径？ |
-| 11 | [测试夹具](tests/conftest.py)、[单元测试](tests/unit)、[集成测试](tests/integration/test_ping_roundtrip.py) | 如何准备环境、检查结果、测试异常、清理子进程？ |
-| 12 | [文档生成脚本](scripts/gen_protocol_doc.py) | 模型如何转换为 JSON Schema，再拼接为 Markdown？ |
+| 1 | [入口配置](../pyproject.toml) | 安装后为什么可以运行 `kama`、`kama-core`？查看 `[project.scripts]`。 |
+| 2 | [CLI 入口](../src/kama_claude/cli/main.py) | 命令行文字如何变成 `args.version`、`args.command`？ |
+| 3 | [配置](../src/kama_claude/core/config.py) | 配置对象如何创建？文件和环境变量如何覆盖默认值？ |
+| 4 | [日志](../src/kama_claude/core/logging_setup.py) | 日志级别、格式和输出位置分别由谁负责？ |
+| 5 | [ping 客户端](../src/kama_claude/cli/commands/ping.py) | 同步函数如何进入异步代码？字典如何通过 TCP 发送？ |
+| 6 | [core 应用](../src/kama_claude/core/app.py) | 服务如何启动、注册处理器并响应退出信号？ |
+| 7 | [TCP 服务](../src/kama_claude/core/transport/socket_server.py) | 一行数据如何变成方法调用，再变成响应？ |
+| 8 | [协议外壳](../src/kama_claude/core/bus/envelope.py) | 请求、成功响应、错误响应各包含什么字段？ |
+| 9 | [命令模型](../src/kama_claude/core/bus/commands.py)与[事件模型](../src/kama_claude/core/bus/events.py) | Pydantic 如何描述字段和检查数据？哪些定义尚未进入运行链？ |
+| 10 | [路径辅助函数](../src/kama_claude/core/runs.py) | `Path` 的 `/` 为什么能拼接路径？ |
+| 11 | [测试夹具](../tests/conftest.py)、[单元测试](../tests/unit)、[集成测试](../tests/integration/test_ping_roundtrip.py) | 如何准备环境、检查结果、测试异常、清理子进程？ |
+| 12 | [文档生成脚本](../scripts/gen_protocol_doc.py) | 模型如何转换为 JSON Schema，再拼接为 Markdown？ |
 
-各目录的 `__init__.py` 和 `__main__.py` 也有注释，分别说明包的组织和 `python -m` 的入口机制。版本命令在 [version.py](src/kama_claude/cli/commands/version.py)。
+各目录的 `__init__.py` 和 `__main__.py` 也有注释，分别说明包的组织和 `python -m` 的入口机制。版本命令在 [version.py](../src/kama_claude/cli/commands/version.py)。
 
 ## 跟踪一次 ping
 
@@ -93,4 +93,4 @@ TCP → 字节 → json.loads → Python 数据 → model_validate → 模型对
 
 本次注释采用 `#`，保留现有文档字符串及可执行语句。可通过比较修改前后的 Python AST，检查有没有改变语法结构；再运行已有测试确认当前环境中的行为。AST 相同不代表行号相同，堆栈和调试断点的行号会随注释增加而移动。
 
-项目已有检查命令见 [CLAUDE.md](CLAUDE.md) 和 [Makefile](Makefile)。教学变更应保存在 `study/s0` 的提交中；未提交的工作区改动可能随分支切换一起移动。
+项目已有检查命令见 [CLAUDE.md](../CLAUDE.md) 和 [Makefile](../Makefile)。教学变更应保存在 `study/s0` 的提交中；未提交的工作区改动可能随分支切换一起移动。
