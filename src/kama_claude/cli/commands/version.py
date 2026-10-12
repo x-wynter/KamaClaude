@@ -1,3 +1,5 @@
+# 版本子命令：从顶层包读取 __version__，用内置 print 写入标准输出。
+
 import kama_claude
 
 
