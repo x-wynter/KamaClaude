@@ -11,11 +11,14 @@ type EventHandler = Callable[[BaseModel], Awaitable[None]]
 
 
 class EventBus:
+    # 为本总线创建独立订阅列表；不同 EventBus 实例互不共享。
     def __init__(self) -> None:
         self._subscribers: list[EventHandler] = []
 
     # 注册一个事件处理函数
     def subscribe(self, handler: EventHandler) -> None:
+        # 保存函数本身，不写 handler()；实际调用发生在 publish。
+        # 允许重复订阅，同一 handler 注册两次就会被调用两次。
         self._subscribers.append(handler)
 
     # 按注册顺序依次调用所有订阅者

@@ -35,11 +35,13 @@ class LoggingConfig:
 
 
 @dataclass
+# S1 新增任务配置；max_steps 限制模型调用轮数，不是工具调用总数。
 class AgentConfig:
     max_steps: int = _DEFAULT_MAX_STEPS
 
 
 @dataclass
+# 模型配置独立成对象；router 当前只是保存字符串，S1 未据此实现动态路由。
 class LlmConfig:
     default_model: str = _DEFAULT_MODEL
     router: str = "static"  # "static" | "rule_based" (S4) | "cost_budget" (S6)
@@ -53,6 +55,7 @@ class KamaConfig:
     # field 来自 dataclasses；default_factory 接收可调用对象而不是调用结果。
     # 每次省略 logging 参数时都会调用 LoggingConfig()，避免多个配置共享默认对象。
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    # default_factory 为每份 KamaConfig 分别创建子配置，避免配置实例共享可变状态。
     agent: AgentConfig = field(default_factory=AgentConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
 
@@ -134,6 +137,7 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
                 # 例如 key == "level" 时，等价于 config.logging.level = val。
                 setattr(config.logging, key, val)
 
+    # TOML 的 [agent] 解析为嵌套字典；只覆盖明确提供的字段。
     if "agent" in data:
         agent = data["agent"]
         if not isinstance(agent, dict):
@@ -147,6 +151,7 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
                 raise SystemExit("Config error: agent.max_steps must be a positive integer")
             config.agent.max_steps = val
 
+    # S1 增加 [llm] 小节，仍先拒绝未知键再检查已知字段类型。
     if "llm" in data:
         llm = data["llm"]
         if not isinstance(llm, dict):
@@ -194,6 +199,7 @@ def _apply_env(config: KamaConfig) -> None:
     if log_format is not None:
         config.logging.format = log_format
 
+    # 环境变量都是字符串，需先 int 转换，再检查正数；不能直接与整数比较。
     max_steps_str = os.environ.get("KAMA_MAX_STEPS")
     if max_steps_str is not None:
         try:

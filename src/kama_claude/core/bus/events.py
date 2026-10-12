@@ -1,4 +1,4 @@
-# 事件数据模型：描述 core 启动事件的数据形状，供模型测试和协议文档使用。
+# 事件数据模型：描述任务、步骤、工具和模型调用的可观察记录。
 # 当前 CoreApp.run 没有发布此事件；定义模型不等于已经实现发送逻辑。
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ class CoreStartedEvent(BaseModel):
     version: str
 
 
+# Runner 创建任务后发布，goal 是本次用户目标，run_id 用于关联后续全部事件。
 class RunStartedEvent(BaseModel):
     type: Literal["run.started"] = "run.started"
     run_id: str
@@ -23,6 +24,8 @@ class RunStartedEvent(BaseModel):
     ts: str  # ISO 8601
 
 
+# Runner 收尾时发布；steps 是已执行轮数，reason 允许为 None。
+# status 的 str 标注不强制限定枚举值，注释列出的是业务约定。
 class RunFinishedEvent(BaseModel):
     type: Literal["run.finished"] = "run.finished"
     run_id: str
@@ -32,6 +35,7 @@ class RunFinishedEvent(BaseModel):
     ts: str
 
 
+# Loop 每次模型请求前发布；step 是从 1 开始的当前轮数。
 class StepStartedEvent(BaseModel):
     type: Literal["step.started"] = "step.started"
     run_id: str
@@ -39,6 +43,7 @@ class StepStartedEvent(BaseModel):
     ts: str
 
 
+# 正常完成本轮处理后发布；异常提前退出时不一定有这条事件。
 class StepFinishedEvent(BaseModel):
     type: Literal["step.finished"] = "step.finished"
     run_id: str
@@ -46,6 +51,8 @@ class StepFinishedEvent(BaseModel):
     ts: str
 
 
+# 工具执行入口发布；tool_use_id 关联某次调用，tool_name 用来找实现。
+# params 保存调用参数；相同工具多次调用通常有不同 tool_use_id。
 class ToolCallStartedEvent(BaseModel):
     type: Literal["tool.call_started"] = "tool.call_started"
     run_id: str
@@ -55,6 +62,7 @@ class ToolCallStartedEvent(BaseModel):
     ts: str
 
 
+# 工具成功完成时发布耗时；完整工具结果仍通过 ToolResult 传给 Loop。
 class ToolCallFinishedEvent(BaseModel):
     type: Literal["tool.call_finished"] = "tool.call_finished"
     run_id: str
@@ -64,6 +72,7 @@ class ToolCallFinishedEvent(BaseModel):
     ts: str
 
 
+# 工具调用失败事件；error_type 便于分类，error_message 提供具体原因。
 class ToolCallFailedEvent(BaseModel):
     type: Literal["tool.call_failed"] = "tool.call_failed"
     run_id: str
@@ -75,6 +84,7 @@ class ToolCallFailedEvent(BaseModel):
     ts: str
 
 
+# 每次收到文本片段时发布；token 字段实际保存片段字符串，而非 token 编号。
 class LlmTokenEvent(BaseModel):
     type: Literal["llm.token"] = "llm.token"
     run_id: str
@@ -82,6 +92,7 @@ class LlmTokenEvent(BaseModel):
     ts: str
 
 
+# 流式请求结束后发布 SDK 的用量统计，缓存计数和普通输入输出计数分字段保存。
 class LlmUsageEvent(BaseModel):
     type: Literal["llm.usage"] = "llm.usage"
     run_id: str
@@ -92,6 +103,7 @@ class LlmUsageEvent(BaseModel):
     ts: str
 
 
+# 模型调用前记录本次模型与选择策略；S1 固定发布 static。
 class LlmModelSelectedEvent(BaseModel):
     type: Literal["llm.model_selected"] = "llm.model_selected"
     run_id: str
@@ -100,6 +112,7 @@ class LlmModelSelectedEvent(BaseModel):
     ts: str
 
 
+# 日志事件的数据定义；S1 的 logging 并未自动连接总线来发布此模型。
 class LogLineEvent(BaseModel):
     type: Literal["log.line"] = "log.line"
     run_id: str
@@ -111,6 +124,8 @@ class LogLineEvent(BaseModel):
 
 # 根据 type 字段决定事件类型的判别联合
 # Annotated 附加按 type 判别的元数据；S1 已有多种事件，解析时按 type 选择具体模型。
+# A | B 表示可以是 A 或 B；Annotated 在类型之外附加 Pydantic 的判别规则。
+# 这是类型描述，不是事件队列，也不负责发布事件或调用回调。
 Event = Annotated[
     CoreStartedEvent
     | RunStartedEvent

@@ -35,6 +35,8 @@ def sample_file(tmp_path: Path) -> Path:
     return f
 
 
+# 功能：真实模型使用 read_file 并完成任务。
+# 设计：设置临时文件和确定内容，检查落盘事件；有密钥时会真实请求 API。
 async def test_run_e2e_reads_file_and_succeeds(
     sample_file: Path,
     tmp_path: Path,

@@ -6,6 +6,7 @@ from kama_claude.core.tools.base import BaseTool
 
 
 class ToolRegistry:
+    # 创建名字到工具实例的映射；同一实例后续可能被多次调用。
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool] = {}
 
@@ -16,6 +17,7 @@ class ToolRegistry:
 
     # 按名称查找工具，不存在返回 None
     def get(self, name: str) -> BaseTool | None:
+        # dict.get 不存在时返回 None，而 [] 取不存在的键会抛 KeyError。
         return self._tools.get(name)
 
     # 返回所有工具的 Anthropic 格式 schema 列表
@@ -25,7 +27,9 @@ class ToolRegistry:
             {
                 "name": tool.name,
                 "description": tool.description,
+                # 这里使用原 schema 字典引用，没有深拷贝；调用方不应随意原地改它。
                 "input_schema": tool.input_schema,
             }
+            # values 遍历存储的工具实例；列表推导式为每个实例生成上面的描述字典。
             for tool in self._tools.values()
         ]

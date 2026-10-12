@@ -25,6 +25,7 @@ class _MockProvider:
         responses: list[LlmResponse],
         exc: BaseException | None = None,
     ) -> None:
+        # iter 将列表转为有当前位置的迭代器；每次 chat 用 next 取下一份预设响应。
         self._responses = iter(responses)
         self._exc = exc
 
@@ -37,6 +38,7 @@ class _MockProvider:
     ) -> LlmResponse:
         if self._exc is not None:
             raise self._exc
+        # 没有剩余响应时会抛 StopIteration；因此测试必须准备足够的模型轮次。
         return next(self._responses)
 
 
@@ -78,6 +80,7 @@ def _make_loop(
     registry: ToolRegistry | None = None,
     bus: EventBus | None = None,
 ) -> tuple[AgentLoop, EventBus]:
+    # 允许传入已订阅的总线；返回 (loop, b) 元组方便测试同时驱动和观察。
     b = bus or EventBus()
     return AgentLoop(provider, registry or ToolRegistry(), b), b  # type: ignore[arg-type]
 
@@ -88,6 +91,7 @@ async def _events(bus: EventBus) -> list[BaseModel]:
     async def _h(e: BaseModel) -> None:
         collected.append(e)
 
+    # _h 闭包持有 collected；返回列表后，后续回调仍可向同一列表追加元素。
     bus.subscribe(_h)
     return collected
 
@@ -95,8 +99,11 @@ async def _events(bus: EventBus) -> list[BaseModel]:
 # --- tests -------------------------------------------------------------------
 
 
+# 功能：模型第一轮结束时任务成功。
+# 设计：只提供一份响应，检查状态和实际轮数。
 async def test_end_turn_marks_success() -> None:
     provider = _MockProvider([LlmResponse(stop_reason="end_turn", text="done")])
+    # 元组解包取出 Loop；下划线变量表示这次不使用返回的总线。
     loop, _ = _make_loop(provider)
     ctx = _ctx()
     await loop.run(ctx)
@@ -104,9 +111,12 @@ async def test_end_turn_marks_success() -> None:
     assert ctx.step == 1
 
 
+# 功能：连续工具调用达到上限时失败。
+# 设计：预置多于上限的响应，确认循环停在设定步数。
 async def test_max_steps_marks_failed() -> None:
     tc = _tc("unknown", {})
     provider = _MockProvider([LlmResponse(stop_reason="tool_use", tool_calls=[tc])] * 10)
+    # 元组解包取出 Loop；下划线变量表示这次不使用返回的总线。
     loop, _ = _make_loop(provider)
     ctx = _ctx(max_steps=2)
     await loop.run(ctx)
@@ -115,6 +125,8 @@ async def test_max_steps_marks_failed() -> None:
     assert ctx.step == 2
 
 
+# 功能：一次工具调用后模型可正常结束。
+# 设计：用两份预设响应模拟 act 后继续 plan 的流程。
 async def test_tool_use_then_end_turn_marks_success() -> None:
     provider = _MockProvider([
         LlmResponse(stop_reason="tool_use", tool_calls=[_tc()]),
@@ -129,6 +141,8 @@ async def test_tool_use_then_end_turn_marks_success() -> None:
     assert ctx.step == 2
 
 
+# 功能：工具输出按调用 ID 加入对话历史。
+# 设计：使用确定文本的回显工具，检查第三条消息中的结果块。
 async def test_tool_result_appended_to_context() -> None:
     provider = _MockProvider([
         LlmResponse(stop_reason="tool_use", tool_calls=[_tc(inp={"msg": "hello"})]),
@@ -147,6 +161,8 @@ async def test_tool_result_appended_to_context() -> None:
     assert block["content"] == "hello"
 
 
+# 功能：工具异常不会直接终止 Agent 循环。
+# 设计：第一轮工具失败，第二轮模型结束，检查成功及两步计数。
 async def test_tool_failure_loop_continues_to_success() -> None:
     provider = _MockProvider([
         LlmResponse(stop_reason="tool_use", tool_calls=[_tc("fail", {})]),
@@ -161,6 +177,8 @@ async def test_tool_failure_loop_continues_to_success() -> None:
     assert ctx.step == 2
 
 
+# 功能：工具失败在历史消息中标记 is_error。
+# 设计：直接检查工具结果块，而不只检查最终任务状态。
 async def test_tool_failure_result_is_error_in_context() -> None:
     provider = _MockProvider([
         LlmResponse(stop_reason="tool_use", tool_calls=[_tc("fail", {})]),
@@ -176,8 +194,11 @@ async def test_tool_failure_result_is_error_in_context() -> None:
     assert block.get("is_error") is True
 
 
+# 功能：取消会标记失败且继续向上传播。
+# 设计：假模型抛 CancelledError，既检查异常也检查上下文。
 async def test_cancelled_error_marks_failed_and_reraises() -> None:
     provider = _MockProvider([], exc=asyncio.CancelledError())
+    # 元组解包取出 Loop；下划线变量表示这次不使用返回的总线。
     loop, _ = _make_loop(provider)
     ctx = _ctx()
     with pytest.raises(asyncio.CancelledError):
@@ -186,8 +207,11 @@ async def test_cancelled_error_marks_failed_and_reraises() -> None:
     assert ctx.reason == "cancelled"
 
 
+# 功能：模型异常导致 llm_error 失败。
+# 设计：假 provider 主动抛异常，避免依赖真实网络故障。
 async def test_llm_api_error_marks_failed() -> None:
     provider = _MockProvider([], exc=RuntimeError("api error"))
+    # 元组解包取出 Loop；下划线变量表示这次不使用返回的总线。
     loop, _ = _make_loop(provider)
     ctx = _ctx()
     await loop.run(ctx)
@@ -195,6 +219,8 @@ async def test_llm_api_error_marks_failed() -> None:
     assert ctx.reason == "llm_error"
 
 
+# 功能：正常步骤发布开始和结束事件。
+# 设计：订阅总线后运行单步任务，观察实际事件。
 async def test_step_started_and_finished_events_published() -> None:
     bus = EventBus()
     events = await _events(bus)
@@ -207,6 +233,8 @@ async def test_step_started_and_finished_events_published() -> None:
     assert "step.finished" in types
 
 
+# 功能：每轮模型调用将步数增加一次。
+# 设计：连续两次工具请求后结束，预期总计三步。
 async def test_step_counter_increments_across_steps() -> None:
     provider = _MockProvider([
         LlmResponse(stop_reason="tool_use", tool_calls=[_tc()]),
@@ -222,8 +250,11 @@ async def test_step_counter_increments_across_steps() -> None:
     assert ctx.status == "success"
 
 
+# 功能：模型文本转换为 assistant 的 text 块。
+# 设计：检查角色、块类型和正文，验证消息包装方式。
 async def test_assistant_message_blocks_added_to_context() -> None:
     provider = _MockProvider([LlmResponse(stop_reason="end_turn", text="answer")])
+    # 元组解包取出 Loop；下划线变量表示这次不使用返回的总线。
     loop, _ = _make_loop(provider)
     ctx = _ctx()
     await loop.run(ctx)

@@ -34,6 +34,7 @@ class _SlowTool(BaseTool):
     input_schema: dict[str, object] = {"type": "object", "properties": {}, "required": []}
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
+        # 异步休眠允许 wait_for 发出取消；测试的超时设置只有 0.05 秒。
         await asyncio.sleep(60)
         return ToolResult(content="done")
 
@@ -66,6 +67,7 @@ async def _run(
         events.append(e)
 
     bus.subscribe(_collect)
+    # 运行真实调用包装器，再把业务返回值与收集事件一起作为元组返回。
     result = await invoke_tool(registry, tool_call, bus, run_id="r1", timeout=timeout)
     return result, events
 
@@ -73,6 +75,8 @@ async def _run(
 # --- tests -------------------------------------------------------------------
 
 
+# 功能：工具成功返回文本并发布完成事件。
+# 设计：回显工具提供确定输出，同时排除错误事件混入。
 async def test_success_returns_content_and_finished_event() -> None:
     registry = ToolRegistry()
     registry.register(_EchoTool())
@@ -85,6 +89,8 @@ async def test_success_returns_content_and_finished_event() -> None:
     assert "tool.call_failed" not in types
 
 
+# 功能：未知工具名被转为运行时错误结果。
+# 设计：空注册表保证查找失败，同时检查开始和失败事件。
 async def test_unknown_tool_returns_runtime_error() -> None:
     result, events = await _run(ToolRegistry(), _call("nonexistent"))
     assert result.is_error
@@ -96,6 +102,8 @@ async def test_unknown_tool_returns_runtime_error() -> None:
     assert "tool.call_finished" not in types
 
 
+# 功能：缺少必填键时返回 schema_error。
+# 设计：注册需要 msg 的工具但传空字典，隔离缺参路径。
 async def test_missing_required_param_gives_schema_error() -> None:
     registry = ToolRegistry()
     registry.register(_EchoTool())
@@ -106,6 +114,8 @@ async def test_missing_required_param_gives_schema_error() -> None:
     assert "tool.call_failed" in types
 
 
+# 功能：等待工具超时后得到 timeout 错误。
+# 设计：异步休眠远长于 0.05 秒限制，无需真的等待 60 秒。
 async def test_timeout_gives_timeout_error() -> None:
     registry = ToolRegistry()
     registry.register(_SlowTool())
@@ -116,6 +126,8 @@ async def test_timeout_gives_timeout_error() -> None:
     assert "tool.call_failed" in types
 
 
+# 功能：工具抛出的异常转换为错误结果。
+# 设计：假工具固定抛出 boom，检查错误分类和原始消息。
 async def test_runtime_exception_gives_runtime_error() -> None:
     registry = ToolRegistry()
     registry.register(_BrokenTool())
@@ -125,6 +137,8 @@ async def test_runtime_exception_gives_runtime_error() -> None:
     assert "boom" in result.content
 
 
+# 功能：参数或查找失败前也先发布开始事件。
+# 设计：使用不存在的工具，验证提前失败路径的事件顺序。
 async def test_started_event_always_first() -> None:
     result, events = await _run(ToolRegistry(), _call("nonexistent"))
     assert events[0].type == "tool.call_started"  # type: ignore[attr-defined]

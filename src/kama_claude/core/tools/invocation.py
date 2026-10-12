@@ -20,6 +20,7 @@ from kama_claude.core.tools.registry import ToolRegistry
 _DEFAULT_TIMEOUT: float = 10.0
 
 
+# 生成事件时间戳；耗时另用单调时钟计算，二者用途不同。
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -44,10 +45,11 @@ async def _fail(
             ts=_now(),
         )
     )
+    # 同一次失败有两条输出路径：事件用于观察，返回值供 Loop 放入模型历史。
     return ToolResult(content=error_message, is_error=True, error_type=error_type)
 
 
-# 校验参数、限时调用工具、发布进度事件，返回 ToolResult（不抛异常）
+# 校验必填参数、限时调用工具并转换常见执行错误；取消和总线异常仍可能传播
 async def invoke_tool(
     registry: ToolRegistry,
     tool_call: ToolCallBlock,
@@ -55,6 +57,7 @@ async def invoke_tool(
     run_id: str,
     timeout: float = _DEFAULT_TIMEOUT,
 ) -> ToolResult:
+    # 记录本次调用的开始时刻；差值单位是秒，elapsed 再转换成毫秒整数。
     t0 = time.monotonic()
 
     await bus.publish(
@@ -62,6 +65,7 @@ async def invoke_tool(
             run_id=run_id,
             tool_use_id=tool_call.id,
             tool_name=tool_call.name,
+            # 复制外层参数字典用于开始事件；嵌套对象仍可能共享引用。
             params=dict(tool_call.input),
             ts=_now(),
         )
@@ -72,6 +76,8 @@ async def invoke_tool(
         return int((time.monotonic() - t0) * 1000)
 
     tool = registry.get(tool_call.name)
+    # 未知工具在这里提前返回，不会进入实际工具执行逻辑。
+    # return await 表示先等待失败事件发布，再把错误结果返回给调用者。
     if tool is None:
         return await _fail(
             bus, run_id, tool_call,
@@ -82,6 +88,7 @@ async def invoke_tool(
     required: list[str] = cast(list[str], tool.input_schema.get("required", []))
     # 列表推导式收集缺失的参数名，空列表在 if 中为 False。
     missing = [p for p in required if p not in tool_call.input]
+    # 非空列表表示至少缺少一个必填键；join 把键名拼成便于阅读的错误信息。
     if missing:
         return await _fail(
             bus, run_id, tool_call,
@@ -92,6 +99,7 @@ async def invoke_tool(
         # 超时会取消被等待协程并抛 TimeoutError；外层将它转换为工具错误。
         result = await asyncio.wait_for(tool.invoke(dict(tool_call.input)), timeout=timeout)
         ms = elapsed()
+        # 工具可以主动返回错误，也可以抛异常；这里处理前者，下方 except 处理后者。
         if result.is_error:
             return await _fail(
                 bus, run_id, tool_call,
@@ -106,7 +114,9 @@ async def invoke_tool(
                 ts=_now(),
             )
         )
+        # 成功时保留工具原始返回对象，Loop 会读取其中的 content。
         return result
+    # wait_for 的取消依赖协程配合；同步阻塞 I/O 不能被此超时机制立即打断。
     except TimeoutError:
         return await _fail(
             bus, run_id, tool_call,
