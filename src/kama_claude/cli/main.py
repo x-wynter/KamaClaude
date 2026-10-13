@@ -1,7 +1,9 @@
-# 学习入口：把终端参数转换成 Python 属性，再调用版本、ping 或 run 功能。
-# S2 的 ping 和 run 都通过 TCP 访问 daemon；core 子命令管理后台进程。
+# ═══ 文件职责：命令行参数解析与功能分发 ═══
+# 协作关系：kama 命令 → main → 对应 cmd_* 函数；run/ping 再与 Core 通信。
+# 阅读路线：定义参数 → 解析参数 → 加载配置 → 按子命令调用函数。
+# 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
 
-# 推迟类型注解的求值；注解用于说明类型，不会自动检查传入的值。
+# ── 依赖导入 ──
 from __future__ import annotations
 
 # argparse、sys 是 Python 标准库；下面 kama_claude 开头的导入来自本项目。
@@ -16,8 +18,10 @@ from kama_claude.core.config import get_config
 from kama_claude.core.logging_setup import setup_logging
 
 
-# CLI 主入口：解析命令行参数并分发到对应子命令
+# ── 函数：main ──
+# 用途：CLI 主入口：解析命令行参数并分发到对应子命令
 def main() -> None:
+    # 步骤 1：定义顶层选项和子命令。
     # 创建参数解析器；prog 仅设置帮助中的程序名，不负责安装 kama 命令。
     parser = argparse.ArgumentParser(prog="kama", description="KamaClaude CLI")
     # store_true 是布尔开关：出现 --version 时为 True，否则为 False。
@@ -41,16 +45,20 @@ def main() -> None:
     core_sub.add_parser("stop", help="Stop the running daemon")
     core_sub.add_parser("status", help="Show daemon status")
 
+    # 步骤 2：解析本次命令行输入。
     args = parser.parse_args()
 
+    # 步骤 3：处理无需配置的版本查询。
     # 先处理版本开关；return 结束当前函数，避免继续进入下面的命令分支。
     if args.version:
         cmd_version()
         return
 
+    # 步骤 4：加载配置并设置日志。
     config = get_config()
     setup_logging(config)
 
+    # 步骤 5：选择并调用对应功能入口。
     if args.command == "ping":
         cmd_ping(config)
     elif args.command == "run":

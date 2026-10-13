@@ -1,6 +1,9 @@
-# CLI 客户端：连接 core，发送一行 JSON 请求，读取一行响应并打印结果。
-# asyncio/json/sys/time 属于标准库；响应模型来自项目，校验能力来自 Pydantic。
+# ═══ 文件职责：发送一次连通性请求 ═══
+# 协作关系：CLI 直接使用 asyncio 读写流，发送 core.ping 并校验响应。
+# 阅读路线：cmd_ping 是同步入口；_ping 负责连接、发送、接收、关闭与输出。
+# 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
 
+# ── 依赖导入 ──
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +17,8 @@ from kama_claude.core.bus.envelope import JsonRpcError, JsonRpcSuccess
 from kama_claude.core.config import KamaConfig
 
 
-# 同步入口：运行 ping 协程，连接失败时打印错误并退出
+# ── 函数：cmd_ping ──
+# 用途：同步入口：运行 ping 协程，连接失败时打印错误并退出
 def cmd_ping(config: KamaConfig) -> None:
     try:
         # _ping 是 async def 函数：调用先得到协程对象；run 创建事件循环并驱动它完成。
@@ -29,14 +33,17 @@ def cmd_ping(config: KamaConfig) -> None:
         sys.exit(1)
 
 
-# 向 core 守护进程发送 ping 请求，打印 pong 响应及延迟
+# ── 函数：_ping ──
+# 用途：向 core 守护进程发送 ping 请求，打印 pong 响应及延迟
 # async def 定义协程函数；await 等待异步操作，并允许事件循环调度其他任务。
 async def _ping(config: KamaConfig) -> None:
+    # 步骤 1：开始计时并建立 TCP 连接。
     # monotonic 是单调时钟，适合计算时间差，不受系统时钟校准影响。
     t0 = time.monotonic()
     # await 等待 TCP 连接建立；元组解包分别取得读流和写流。
     reader, writer = await asyncio.open_connection(config.host, config.port)
 
+    # 步骤 2：构造 ping 请求，编码为 JSON 行后发送。
     # 这是普通字典。id 用于匹配响应，method 是服务端注册的方法名。
     # params 保存业务参数；这里并未先创建 PingCommand 模型。
     req = {
@@ -52,16 +59,19 @@ async def _ping(config: KamaConfig) -> None:
     # 它不保证对端已收到或处理消息。
     await writer.drain()
 
+    # 步骤 3：限时读取响应并计算往返耗时。
     # readline 等到换行或连接结束；wait_for 将这一次读取的等待限制为 10 秒。
     # 这不是对整个 ping 流程设置 10 秒上限。
     line = await asyncio.wait_for(reader.readline(), timeout=10.0)
     # 秒差乘 1000 转为毫秒；int 去掉小数部分。此时间包含连接和请求响应。
     latency_ms = int((time.monotonic() - t0) * 1000)
 
+    # 步骤 4：关闭此次请求使用的连接。
     # close 发起关闭；wait_closed 等待关闭完成。这里位于正常读取路径中。
     writer.close()
     await writer.wait_closed()
 
+    # 步骤 5：解析响应，区分错误与成功并打印结果。
     # loads 将 JSON 字节解析成 Python 数据；与发送时的 dumps 方向相反。
     raw = json.loads(line)
     # 字典的 in 检查键是否存在；服务端错误响应带 error，成功响应带 result。

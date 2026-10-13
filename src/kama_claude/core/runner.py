@@ -1,5 +1,9 @@
-# 一次任务的组装入口：创建上下文、模型、工具与事件订阅，再驱动 AgentLoop。
+# ═══ 文件职责：一次 Agent 任务的准备与收尾 ═══
+# 协作关系：CoreApp 创建 Runner；Runner 组装 Context、Provider、工具和事件文件，再调用 Loop。
+# 阅读路线：先看构造函数保存哪些依赖，再沿 run 阅读目录准备、执行和结束事件。
+# 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
 
+# ── 依赖导入 ──
 from __future__ import annotations
 
 import asyncio
@@ -19,13 +23,20 @@ from kama_claude.core.tools.builtin.read_file import ReadFileTool
 from kama_claude.core.tools.registry import ToolRegistry
 
 
-# 返回带 UTC 时区的时间字符串，供事件 ts 字段记录发生时间。
+# ── 函数：_now ──
+# 用途：返回带 UTC 时区的时间字符串，供事件 ts 字段记录发生时间。
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+# ── 类：AgentRunner ──
+# 职责：组装一次任务所需对象，并负责开始/结束事件与文件生命周期。
+# 字段说明：
+#   _config：任务配置；_bus：可选的共享事件总线；_provider：可替换的模型实现。
+#   _extra_handlers：附加事件回调；_runs_dir：运行记录根目录。
 class AgentRunner:
-    # 组装所有运行时依赖，准备执行一次完整的 agent run
+    # ── 初始化：__init__ ──
+    # 用途：保存配置和可选依赖；实际组装和执行发生在 run 中。
     def __init__(
         self,
         config: KamaConfig,
@@ -46,20 +57,26 @@ class AgentRunner:
         self._extra_handlers: list[EventHandler] = extra_handlers or []
         self._runs_dir = runs_dir or RUNS_DIR
 
-    # 执行一次完整的 agent run：接线事件总线、驱动 AgentLoop、写 events.jsonl
+    # ── 函数：run ──
+    # 用途：执行一次完整的 agent run：接线事件总线、驱动 AgentLoop、写 events.jsonl
+    # 输入：goal 是任务目标；run_id 可由 Core 预先分配，也可在此生成。
+    # 输出：不返回回答字符串；结果通过 context、事件总线和事件文件传递。
     async def run(self, goal: str, *, run_id: str | None = None) -> None:
+        # 步骤 1：确定任务 ID 和记录目录。
         # daemon 先生成 ID 再调度本协程；独立使用 Runner 时仍可自动生成 ID。
         run_id = run_id or new_run_id()
         run_path = self._runs_dir / run_id
         # Path 的 / 拼接目录；parents=True 补齐父目录，exist_ok=True 接受已有目录。
         run_path.mkdir(parents=True, exist_ok=True)
 
+        # 步骤 2：选取事件总线并添加附加回调。
         # 与 S1 不同，允许注入 daemon 的公共总线，让广播器收到此次任务事件。
         # 不注入时仍创建独立总线，便于单元测试。
         bus = self._bus if self._bus is not None else EventBus()
         for h in self._extra_handlers:
             bus.subscribe(h)
 
+        # 步骤 3：创建本次任务独立的消息历史和状态。
         # 上下文仍按任务创建；共享总线不等于共享模型消息历史。
         context = ExecutionContext(
             run_id=run_id,
@@ -67,12 +84,14 @@ class AgentRunner:
             max_steps=self._config.agent.max_steps,
         )
 
+        # 步骤 4：打开事件文件，登记订阅并发布开始事件。
         # async with 管理事件文件；IPC 广播器和文件 writer 订阅同一进程内总线。
         async with EventWriter(run_path / "events.jsonl") as writer:
             # 先登记文件订阅者，再发布开始事件，确保第一条记录就能写入文件。
             writer.subscribe(bus)
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
 
+            # 步骤 5：组装模型、工具注册表和执行循环。
             # S2 将依赖创建放在 run.started 之后；测试可以先观察到任务已启动。
             # 这里只注册 read_file；AgentLoop 仍沿用 S1 的模型—工具循环。
             provider = self._provider or AnthropicProvider(self._config.llm.default_model)
@@ -80,6 +99,7 @@ class AgentRunner:
             registry.register(ReadFileTool())
             loop = AgentLoop(provider, registry, bus)
 
+            # 步骤 6：执行循环并记录取消状态。
             # 暂存取消状态，写完结束事件并关闭文件后再向调用方抛出取消异常。
             cancelled = False
             try:
@@ -90,6 +110,7 @@ class AgentRunner:
                 if not context.is_done():
                     context.mark_failed("cancelled")
 
+            # 步骤 7：发布任务结束事件，离开上下文关闭文件。
             await bus.publish(
                 RunFinishedEvent(
                     run_id=run_id,
@@ -101,6 +122,7 @@ class AgentRunner:
                 )
             )
 
+        # 步骤 8：把取消异常继续交给上层。
         # 保留取消语义，不能把取消悄悄当作正常返回。
         if cancelled:
             raise asyncio.CancelledError()
