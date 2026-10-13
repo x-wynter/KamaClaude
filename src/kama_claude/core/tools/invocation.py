@@ -21,7 +21,7 @@ from kama_claude.core.llm.types import ToolCallBlock
 from kama_claude.core.tools.base import ToolResult
 from kama_claude.core.tools.registry import ToolRegistry
 
-_DEFAULT_TIMEOUT: float = 10.0
+_DEFAULT_TIMEOUT: float = 120.0
 
 
 # ── 函数：_now ──
@@ -126,6 +126,8 @@ async def invoke_tool(
                 tool_use_id=tool_call.id,
                 tool_name=tool_call.name,
                 elapsed_ms=ms,
+                # S3 将完整工具结果放到成功事件，TUI 可展开查看；不再只看到耗时。
+                output=result.content,
                 ts=_now(),
             )
         )

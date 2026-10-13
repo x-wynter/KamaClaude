@@ -64,6 +64,8 @@ class AgentLoop:
                     tool_schemas=self._registry.tool_schemas(),
                     bus=self._bus,
                     run_id=context.run_id,
+                    # S3 将轮次传给 provider 包装器，用于把 LLM trace 对应到本步。
+                    step=context.step,
                 )
             # 裸 raise 重新抛出当前异常，让 Runner 执行取消收尾。
             except asyncio.CancelledError:
@@ -100,6 +102,8 @@ class AgentLoop:
 
             # 步骤 5：判断结束原因：模型完成优先于步数上限。
             if response.stop_reason == "end_turn":
+                # S3 保存最终回答供 run_and_capture 返回；成功不代表 .tasks 中全部 completed。
+                context.result = response.text or ""
                 context.mark_success()
             # 只有没有命中 end_turn 时才判断上限，避免完成任务的最后一步被误判失败。
             elif context.step >= context.max_steps:

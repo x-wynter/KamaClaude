@@ -14,8 +14,12 @@ import logging
 import signal
 import time
 from contextlib import ExitStack
+from datetime import UTC
+from pathlib import Path
 from types import FrameType
 from typing import Any
+
+from pydantic import BaseModel
 
 import kama_claude
 from kama_claude.core.bus.commands import (
@@ -31,11 +35,18 @@ from kama_claude.core.events.bus import EventBus
 from kama_claude.core.logging_setup import setup_logging
 from kama_claude.core.runner import AgentRunner
 from kama_claude.core.runs import events_file, new_run_id
+from kama_claude.core.trace.record import TraceRecord
+from kama_claude.core.trace.writer import TraceWriter
 from kama_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
 from kama_claude.core.transport.socket_server import SocketServer, get_connection_writer
 
 # __name__ 是当前模块名；日志器以模块命名，便于定位消息来源。
 logger = logging.getLogger(__name__)
+
+
+# 返回 trace 使用的 UTC 时间字符串；计时仍使用 time.monotonic。
+def _now() -> str:
+    return datetime.datetime.now(UTC).isoformat()
 
 
 # ── 函数：_wait_for_shutdown ──
@@ -85,18 +96,19 @@ async def _wait_for_shutdown() -> None:
 # 字段说明：
 #   _start_time：服务启动的单调时钟读数，用于计算运行时长。
 #   _bus / _broadcaster：进程内事件分发器 / 向客户端发送事件的订阅者。
-#   _current_run_task：当前 Agent 的异步任务；_config：启动时加载的配置。
+#   _running_runs：所有尚未完成的 asyncio.Task；完成回调自动移除，退出时统一取消。
+#   _trace：可选的 daemon 级记录器；_config：启动时加载的配置。
 class CoreApp:
     # ── 初始化：__init__ ──
-    # 用途：创建服务级总线和广播器，初始化计时、配置和任务槽。
+    # 用途：先创建总线与任务集合；广播器和 trace 要等 run 加载配置后创建。
     def __init__(self) -> None:
         self._start_time = time.monotonic()
         # 总线属于 daemon，可由多次 run 共用；广播器是其中一个订阅者。
         self._bus = EventBus()
-        self._broadcaster = IpcEventBroadcaster()
-        self._bus.subscribe(self._broadcaster.handle)
-        self._current_run_task: asyncio.Task[None] | None = None
+        self._broadcaster: IpcEventBroadcaster | None = None
+        self._trace: TraceWriter | None = None
         self._config: KamaConfig | None = None
+        self._running_runs: set[asyncio.Task[None]] = set()
 
     # ── 函数：_ping_handler ──
     # 用途：处理 core.ping 请求，返回服务版本、运行时长和接收时间
@@ -114,29 +126,36 @@ class CoreApp:
             received_at=datetime.datetime.now(datetime.UTC).isoformat(),
         )
 
-    # ── 函数：_agent_run_handler ──
-    # 用途：启动一次 agent run：立即返回 run_id，后台 task 执行 runner.run()
+    # 将 EventBus 业务事件转换为 layer=event 记录；这里只入队，不直接写磁盘。
+    async def _trace_event_handler(self, event: BaseModel) -> None:
+        assert self._trace is not None
+        event_dict = event.model_dump()
+        self._trace.emit(
+            TraceRecord(
+                ts=_now(),
+                direction="CORE",
+                layer="event",
+                kind="event",
+                run_id=event_dict.get("run_id"),
+                data=event_dict,
+            )
+        )
+
+    # 启动一次 agent run：异步创建 AgentRunner 并立即返回 run_id
     async def _agent_run_handler(self, params: dict[str, Any]) -> AgentRunResult:
-        # 步骤 1：校验配置、请求参数和当前任务状态。
+        # 步骤 1：校验配置与请求；S3 移除了 S2 的单 run 限制。
         # run 已加载配置才会接收命令；assert 同时帮助类型检查器排除 None。
         assert self._config is not None
         # 库函数：Pydantic 的 model_validate 校验字典并创建模型；失败时抛出 ValidationError。
         cmd = AgentRunCommand.model_validate(params)
-
-        # S2 同时只接受一个任务；done 区分仍运行与已经结束的 Task。
-        if self._current_run_task is not None and not self._current_run_task.done():
-            raise RuntimeError("a run is already in progress")
-
-        # 步骤 2：准备任务 ID 和 Runner。
+        # 步骤 2：为本次 run 分配 ID 和 Runner，共享 bus/trace，但不共享 Context/Manager。
         run_id = new_run_id()
-        runner = AgentRunner(self._config, bus=self._bus)
-
-        # 步骤 3：调度后台任务，立即返回受理结果。
-        # create_task 调度后台协程，处理器立即返回 ID；这里没有 await 整个任务。
-        # 后台任务与 TCP 处理器仍在同一个 daemon 进程、同一个事件循环中。
-        self._current_run_task = asyncio.create_task(
-            runner.run(cmd.goal, run_id=run_id)
-        )
+        runner = AgentRunner(self._config, bus=self._bus, trace=self._trace)
+        # 步骤 3：标准库 create_task 安排后台协程，立刻返回 ID，不等待模型结束。
+        # add_done_callback 在结束时调用 set.discard；保存强引用也便于退出时取消所有 run。
+        run_task = asyncio.create_task(runner.run(cmd.goal, run_id=run_id))
+        self._running_runs.add(run_task)
+        run_task.add_done_callback(self._running_runs.discard)
         return AgentRunResult(run_id=run_id)
 
     # ── 函数：_subscribe_handler ──
@@ -149,13 +168,14 @@ class CoreApp:
 
         # 步骤 2：按需发送历史记录。
         replayed_count = 0
-        # 先发送历史再注册实时订阅；S2 没有用序号保证两者切换时无缝且不重复。
+        # 先发送历史再注册实时订阅；当前没有序号保证切换时无缝且不重复。
         if cmd.replay_from_run is not None:
             replayed_count = await self._replay_events(
                 cmd.replay_from_run, writer, cmd.topics
             )
 
         # 步骤 3：登记实时订阅并返回订阅信息。
+        assert self._broadcaster is not None
         sub_id = self._broadcaster.subscribe(writer, cmd.topics, cmd.scope)
         return EventSubscribeResult(subscription_id=sub_id, replayed_count=replayed_count)
 
@@ -204,8 +224,23 @@ class CoreApp:
         self._config = get_config()
         setup_logging(self._config)
 
-        # 步骤 2：创建服务器并注册三个命令入口。
-        server = SocketServer(self._config.host, self._config.port, self._broadcaster)
+        # 步骤 2：先启动 trace，再接线事件采集和广播器，最后注册三个 RPC 入口。
+        # Path.expanduser 将 ~ 展开到用户目录；trace=None 表示禁用所有这些采集点。
+        if self._config.trace.enabled:
+            trace_path = Path(self._config.trace.file).expanduser()
+            self._trace = TraceWriter(trace_path)
+            await self._trace.start()
+            self._bus.subscribe(self._trace_event_handler)
+
+        self._broadcaster = IpcEventBroadcaster(trace=self._trace)
+        self._bus.subscribe(self._broadcaster.handle)
+
+        server = SocketServer(
+            self._config.host,
+            self._config.port,
+            self._broadcaster,
+            trace=self._trace,
+        )
         server.register("core.ping", self._ping_handler)
         server.register("agent.run", self._agent_run_handler)
         server.register("event.subscribe", self._subscribe_handler)
@@ -216,13 +251,20 @@ class CoreApp:
         logger.info("kama-core %s listening addr=%s", kama_claude.__version__, addr)
         logger.info("config: %s", self._config)
 
-        # 步骤 4：等待退出信号，最终停止监听。
+        # 步骤 4：等待跨平台退出信号；取消所有 run 后再关闭网络和 trace。
         try:
             await _wait_for_shutdown()
-        # 无论等待正常结束还是抛异常，都尝试关闭已启动的服务器。
         finally:
             logger.info("shutting down")
+            # list 创建快照，避免完成回调 discard 改变正在遍历的集合。
+            pending = list(self._running_runs)
+            for run_task in pending:
+                run_task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             await server.stop()
+            if self._trace is not None:
+                await self._trace.stop()
 
 
 

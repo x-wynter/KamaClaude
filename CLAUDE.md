@@ -14,8 +14,8 @@ uv run mypy src
 
 # Tests
 uv run pytest tests/unit -v           # unit only (fast, no daemon)
-uv run pytest tests/integration -v    # needs no running daemon; fixture spawns one
-uv run pytest tests/ -v               # all
+uv run pytest tests/integration --ignore=tests/integration/test_run_e2e.py -v # offline daemon
+uv run pytest tests/ --ignore=tests/integration/test_run_e2e.py -v # all offline tests
 
 # Single test
 uv run pytest tests/unit/test_envelope.py::test_request_roundtrip -v
@@ -37,7 +37,7 @@ uv run kama --version
 
 ## Architecture
 
-This is a **dual-process** local AI agent system. `kama-core` is a persistent daemon; `kama` and `kama-tui` are clients that connect to it over a Unix domain socket.
+This is a **dual-process** local AI agent system. `kama-core` is a persistent daemon; `kama` and `kama-tui` are clients that connect to it over loopback TCP (NDJSON).
 
 ```
 kama-core (daemon)
@@ -46,13 +46,15 @@ kama-core (daemon)
 kama (CLI)   kama-tui (TUI, S2+)
 ```
 
+**`kama-tui` is the primary frontend.** All user-facing work on task management, observability, and interaction should be designed for and validated in the TUI first. The `kama` CLI exists only for quick scripted testing and debugging — it is not a product surface. When implementing features that touch the user interface, invest in the TUI layout, event rendering, and keyboard interactions. Do not shortcut TUI work by pointing to the CLI as an alternative.
+
 ### Protocol layer (`src/kama_claude/core/bus/`)
 
 All IPC messages are typed pydantic v2 models with a **discriminated union on the `type` field**. This is the contract boundary — adding a new command or event means adding a new model class to `commands.py` or `events.py` and extending the `Command`/`Event` union.
 
 - `envelope.py` — `JsonRpcRequest`, `JsonRpcSuccess`, `JsonRpcError`, error code constants, `make_error()`
-- `commands.py` — `Command` union; currently only `PingCommand` + `PongResult`
-- `events.py` — `Event` union; currently only `CoreStartedEvent`
+- `commands.py` — `Command` union; `core.ping`, `agent.run`, and `event.subscribe` request/result models
+- `events.py` — `Event` union; run, step, tool, LLM, log and core event models
 
 `WIRE_PROTOCOL.md` is **generated** from these models by `scripts/gen_protocol_doc.py`. Always regenerate and commit it after changing bus models.
 
@@ -70,7 +72,7 @@ Relevant env vars: `KAMA_CONFIG`, `KAMA_HOST`, `KAMA_PORT`, `KAMA_LOG_LEVEL`, `K
 
 ### Daemon entry (`src/kama_claude/core/app.py`)
 
-`CoreApp.run()` is the single async entry point: loads config → sets up logging → creates `SocketServer` → registers handlers → waits for `SIGINT`/`SIGTERM` → calls `server.stop()`. Adding new handlers: instantiate a handler method on `CoreApp` and call `server.register()`.
+`CoreApp.run()` is the single async entry point: loads config → sets up logging → creates `SocketServer` → registers handlers → starts optional unified trace → waits for cross-platform shutdown signals → cancels/awaits active runs → stops server and trace. Adding new handlers: instantiate a handler method on `CoreApp` and call `server.register()`.
 
 ### Testing
 
@@ -108,3 +110,15 @@ The planning documents live in `../docs/` (sibling of this repo, not committed h
 - `agent_development_plan.md` — staged development roadmap S0–S8
 - `s0_implementation_plan.md` — detailed S0 decisions and rationale
 - `agent_functional_outline.md` — full feature catalogue
+
+## S3 learning branch
+
+`AgentRunner` registers eight tools. Four `task_*` tools share a per-run file-backed
+`TaskManager`; they are not `task.*` RPC handlers or an automatic task scheduler.
+Unified trace captures IPC, EventBus events and LLM calls. TUI displays streaming
+text and collapsible tool blocks; it has no input box in S3.
+
+See `doc/STUDY_GUIDE_S3.md` and `doc/S3_VALIDATION.md` for the current implementation,
+Windows adaptations and offline validation. `tests/offline_daemon.py` substitutes
+only the model boundary in local daemon tests. The separate `test_run_e2e.py` calls
+a real model and must only be run intentionally with credentials.

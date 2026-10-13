@@ -114,7 +114,7 @@ def cmd_core_start(config: KamaConfig) -> None:
 
     # 步骤 2：使用当前 Python 解释器启动后台 Core。
     # 使用当前解释器和模块入口，避免 PATH 中另一个 Python 环境接管 daemon。
-    # Popen 返回时只表示进程已创建；S2 不在这里等待端口就绪。
+    # Popen 返回时只表示进程已创建；当前不在这里等待端口就绪。
     proc = subprocess.Popen(
         [sys.executable, "-m", "kama_claude.core"],
         # Windows 创建无窗口后台进程；POSIX 用新会话脱离当前终端。

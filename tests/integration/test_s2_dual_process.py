@@ -1,4 +1,4 @@
-# 注意：只等待 started 不等于阻止模型请求；配置了真实密钥时后台仍可能调用 API。
+# S3 适配：running_daemon 使用 tests.offline_daemon，真实网络通信配合假模型，无 API 请求。
 
 from __future__ import annotations
 

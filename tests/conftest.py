@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 
@@ -40,19 +41,29 @@ def free_port() -> int:
 @pytest.fixture
 # 异步生成器夹具：yield 前准备服务，yield 将进程交给测试，之后做清理。
 # AsyncGenerator 的第一个类型参数是产出类型，第二个是接收值类型。
-async def running_daemon(free_port: int) -> AsyncGenerator[subprocess.Popen[bytes], None]:
+async def running_daemon(free_port: int, tmp_path: Path) -> AsyncGenerator[subprocess.Popen[bytes], None]:
     # 复制环境再修改，作为子进程环境，不直接更改父进程的 os.environ。
     env = os.environ.copy()
     env["KAMA_PORT"] = str(free_port)
     env["KAMA_LOG_FILE"] = ""
     env["KAMA_LOG_LEVEL"] = "WARNING"
 
+    # S3：该共享夹具专用于离线通信测试，模型在子进程入口替换为固定结果。
+    # 临时 cwd 不加载项目 .env，也不向真实 runs/ 或用户 trace 目录写入。
+    env["KAMA_CONFIG"] = str(tmp_path / "absent.toml")
+    env["KAMA_TRACE_FILE"] = str(tmp_path / "trace.jsonl")
+    env["KAMA_HOST"] = "127.0.0.1"
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
     # Popen 启动子进程后立即返回；sys.executable 保证使用当前测试解释器。
     # 参数用列表传入，无需拼接 shell 命令；-m 表示按模块名运行。
-    proc = subprocess.Popen([sys.executable, "-m", "kama_claude.core"], env=env)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "tests.offline_daemon"],
+        env=env, cwd=tmp_path,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
 
     # 计算启动截止时刻；轮询真实连接成功与否，避免仅凭固定延时判断就绪。
-    # S2 会额外导入模型 SDK；Windows 冷启动可能接近 3 秒，给 10 秒上限。
+    # S3 会额外导入模型 SDK；Windows 冷启动可能接近 3 秒，给 10 秒上限。
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         # 异步等待 0.05 秒，期间让事件循环处理其他任务。

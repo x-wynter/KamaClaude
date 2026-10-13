@@ -116,7 +116,7 @@ async def _run_async(goal: str, config: KamaConfig) -> int:
     # 步骤 5：先订阅事件，再提交任务目标。
     try:
         # 先订阅再提交目标，否则可能错过任务很快发布的 run.started/finished。
-        # S2 使用 global 订阅，事件回调没有按返回的 run_id 再过滤。
+        # 当前使用 global 订阅，事件回调没有按返回的 run_id 再过滤。
         await client.send_command(
             "event.subscribe",
             {
@@ -133,7 +133,7 @@ async def _run_async(goal: str, config: KamaConfig) -> int:
 
     # 步骤 6：等待任务完成事件，而非仅等待提交响应。
     # agent.run 的 RPC 响应只表示任务已提交；真正完成由 run.finished 通知。
-    # S2 此处未与断线任务竞争等待，运行途中断线可能一直等到用户 Ctrl+C。
+    # 当前此处未与断线任务竞争等待，运行途中断线可能一直等到用户 Ctrl+C。
     await finished.wait()
 
     # 步骤 7：停止接收循环，关闭连接并返回退出码。

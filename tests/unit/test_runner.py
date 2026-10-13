@@ -24,6 +24,8 @@ class _EndTurnProvider:
         tool_schemas: list[dict[str, object]],
         bus: EventBus,
         run_id: str,
+        *,
+        step: int = 0,
     ) -> LlmResponse:
         # 假模型立即结束，用最少步骤验证 Runner 的组装与收尾，不依赖工具执行。
         return LlmResponse(stop_reason="end_turn", text="done")
@@ -41,6 +43,8 @@ class _LoopingProvider:
         tool_schemas: list[dict[str, object]],
         bus: EventBus,
         run_id: str,
+        *,
+        step: int = 0,
     ) -> LlmResponse:
         # 记录模型调用次数，便于验证配置的 max_steps 是否真正影响循环。
         self._call += 1

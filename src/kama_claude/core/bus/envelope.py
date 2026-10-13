@@ -71,6 +71,19 @@ INVALID_PARAMS = -32602   # 参数错误
 INTERNAL_ERROR = -32603   # 服务器内部错误
 
 
+# ── 类：HandlerError ──
+# 职责：携带业务错误码 code 与可选 data；传输层捕获后返回 JSON-RPC error。
+# 当前 Core 的三个 handler 未主动使用它；保留为已接通的通用错误接口。
+class HandlerError(Exception):
+    """命令 handler 抛出此异常，SocketServer 将其转换为结构化 JSON-RPC 错误响应。"""
+
+    # 初始化异常文本和结构化字段，super 将 message 交给 Exception 保存。
+    def __init__(self, code: int, message: str, data: Any = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.data = data
+
+
 # ── 函数：make_error ──
 # 用途：构造一个 JSON-RPC 错误响应对象
 def make_error(id: str | None, code: int, message: str, data: Any = None) -> JsonRpcError:

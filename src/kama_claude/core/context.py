@@ -27,6 +27,8 @@ class ExecutionContext:
     status: str = "running"  # "running" | "success" | "failed"
     # 字段：失败原因，由 mark_failed 设置；初始为空。
     reason: str | None = None
+    # S3：Loop 在 end_turn 时写最终文本，Runner 通过 RunOutcome 返回；不含此前所有思考片段。
+    result: str = ""
 
     # ── 函数：__post_init__ ──
     # 用途：初始化时将 goal 作为第一条用户消息写入消息历史

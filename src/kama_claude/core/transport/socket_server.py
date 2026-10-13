@@ -11,6 +11,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -20,10 +21,14 @@ from kama_claude.core.bus.envelope import (
     INVALID_REQUEST,
     METHOD_NOT_FOUND,
     PARSE_ERROR,
+    HandlerError,
+    JsonRpcError,
     JsonRpcRequest,
     JsonRpcSuccess,
     make_error,
 )
+from kama_claude.core.trace.record import TraceRecord
+from kama_claude.core.trace.writer import TraceWriter
 from kama_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
 
 logger = logging.getLogger(__name__)
@@ -37,6 +42,12 @@ type CommandHandler = Callable[[dict[str, Any]], Awaitable[Any]]
 _writer_var: ContextVar[asyncio.StreamWriter] = ContextVar("_writer_var")
 
 
+# 返回 IPC trace 的 UTC 采集时间。
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+# 返回当前 handler 调用所属连接的 StreamWriter
 # ── 函数：get_connection_writer ──
 # 用途：返回当前 handler 调用所属连接的 StreamWriter
 def get_connection_writer() -> asyncio.StreamWriter:
@@ -54,7 +65,11 @@ class SocketServer:
     # ── 初始化：__init__ ──
     # 用途：建立本实例的初始状态；字段含义见类上方的说明。
     def __init__(
-        self, host: str, port: int, broadcaster: IpcEventBroadcaster | None = None
+        self,
+        host: str,
+        port: int,
+        broadcaster: IpcEventBroadcaster | None = None,
+        trace: TraceWriter | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -63,6 +78,7 @@ class SocketServer:
         # | None 表示尚未启动时可以为空，启动后保存 asyncio 的服务器对象。
         self._server: asyncio.AbstractServer | None = None
         self._broadcaster = broadcaster
+        self._trace = trace
 
     # ── 函数：register ──
     # 用途：注册一个方法名对应的命令处理函数
@@ -181,6 +197,19 @@ class SocketServer:
             await self._send(writer, make_error(None, INVALID_REQUEST, "Invalid Request", str(e)))
             return
 
+        if self._trace is not None:
+            client_id = str(writer.get_extra_info("peername", "<unknown>"))
+            self._trace.emit(
+                TraceRecord(
+                    ts=_now(),
+                    direction="CLIENT→CORE",
+                    layer="ipc",
+                    kind="command",
+                    client_id=client_id,
+                    data={"method": req.method, "id": req.id, "params": req.params},
+                )
+            )
+
         # 步骤 3：按 method 找到业务处理函数。
         # 按方法名查字典；get 找不到时返回 None，下面回复方法不存在错误。
         handler = self._handlers.get(req.method)
@@ -197,6 +226,10 @@ class SocketServer:
         try:
             # 调用注册的业务函数并等待结果；参数是已解析的 params 字典。
             result = await handler(req.params)
+        # S3 支持业务错误接口；code/data 由 handler 给出，不统一改写成 -32603。
+        except HandlerError as e:
+            await self._send(writer, make_error(req.id, e.code, str(e), e.data))
+            return
         except ValidationError as e:
             await self._send(
                 writer,
@@ -224,3 +257,17 @@ class SocketServer:
         writer.write(msg.model_dump_json().encode() + b"\n")
         # 等待写缓冲压力缓解，避免持续写入过快；不是对端已处理消息的确认。
         await writer.drain()
+        if self._trace is not None:
+            # 响应成功写入缓冲后采集；顶层不填 run_id，请求 ID 在 data 内。
+            kind = "error" if isinstance(msg, JsonRpcError) else "response"
+            client_id = str(writer.get_extra_info("peername", "<unknown>"))
+            self._trace.emit(
+                TraceRecord(
+                    ts=_now(),
+                    direction="CORE→CLIENT",
+                    layer="ipc",
+                    kind=kind,
+                    client_id=client_id,
+                    data=msg.model_dump(),
+                )
+            )

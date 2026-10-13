@@ -1,6 +1,6 @@
 # ═══ 文件职责：配置定义与分层加载 ═══
 # 协作关系：Core、CLI、TUI 各自调用 get_config，得到自己的配置对象。
-# 阅读路线：先看四个 dataclass，再读 get_config；最后展开 TOML 和环境变量覆盖规则。
+# 阅读路线：先看五个 dataclass，再读 get_config；最后展开 TOML 和环境变量覆盖规则。
 # 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
 
 # ── 依赖导入 ──
@@ -24,6 +24,7 @@ _DEFAULT_LOG_FORMAT = "text"
 _DEFAULT_CONFIG_PATH = "~/.kama/config.toml"
 _DEFAULT_MAX_STEPS = 20
 _DEFAULT_MODEL = "claude-sonnet-4-6"
+_DEFAULT_TRACE_FILE = "~/.kama/traces/daemon.jsonl"
 
 
 # ── 类：LoggingConfig ──
@@ -61,9 +62,18 @@ class LlmConfig:
     router: str = "static"  # "static" | "rule_based" (S4) | "cost_budget" (S6)
 
 
+# ── 类：TraceConfig ──
+# 职责：控制统一时间线；enabled 开关，file 路径，include_llm_payload 控制 LLM 详细内容。
+# 关闭 payload 不会清除 IPC params、事件 token 或工具输出；不是全系统内容脱敏开关。
+@dataclass
+class TraceConfig:
+    enabled: bool = True
+    file: str = _DEFAULT_TRACE_FILE
+    include_llm_payload: bool = True  # false 时 LLM 记录只保留摘要
+
+
 # ── 类：KamaConfig ──
-# 职责：汇总监听地址、日志、Agent 和模型配置。
-# 例如 KamaConfig(port=9000) 只替换端口，其他字段仍取默认值。
+# 职责：汇总地址、日志、Agent、模型和 trace；不同启动进程各自加载一份。
 @dataclass
 class KamaConfig:
     # 字段：Core 监听或客户端连接的主机地址。
@@ -76,6 +86,7 @@ class KamaConfig:
     # default_factory 为每份 KamaConfig 分别创建子配置，避免配置实例共享可变状态。
     agent: AgentConfig = field(default_factory=AgentConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
+    trace: TraceConfig = field(default_factory=TraceConfig)
 
 
 # ── 函数：get_config ──
@@ -118,9 +129,8 @@ def get_config() -> KamaConfig:
 # ── 函数：_apply_toml ──
 # 用途：将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
 def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
-    # 步骤 1：检查顶层小节名称。
-    # set 将键名变成集合；集合差集 A - B 得到实际出现但未允许的键。
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm"}
+    # 步骤 1：集合差集找出未知配置章节；S3 允许新增 [trace]。
+    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace"}
     if unknown:
         # sorted 排序得到列表，join 用逗号拼接，保证错误信息顺序稳定。
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
@@ -199,6 +209,30 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
                 raise SystemExit("Config error: llm.router must be a string")
             config.llm.router = val
 
+    # 步骤 6：读取新增 [trace]，分别校验布尔值和文件路径字符串。
+    if "trace" in data:
+        trace = data["trace"]
+        if not isinstance(trace, dict):
+            raise SystemExit("Config error: [trace] must be a table")
+        unknown_trace: set[str] = set(trace.keys()) - {"enabled", "file", "include_llm_payload"}
+        if unknown_trace:
+            raise SystemExit(f"Unknown [trace] keys: {', '.join(sorted(unknown_trace))}")
+        if "enabled" in trace:
+            val = trace["enabled"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: trace.enabled must be a boolean")
+            config.trace.enabled = val
+        if "file" in trace:
+            val = trace["file"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: trace.file must be a string")
+            config.trace.file = val
+        if "include_llm_payload" in trace:
+            val = trace["include_llm_payload"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: trace.include_llm_payload must be a boolean")
+            config.trace.include_llm_payload = val
+
 
 # ── 函数：_apply_env ──
 # 用途：用 KAMA_* 环境变量覆盖 config 中对应字段（若变量已设置）
@@ -252,3 +286,16 @@ def _apply_env(config: KamaConfig) -> None:
     default_model = os.environ.get("KAMA_LLM_DEFAULT_MODEL")
     if default_model is not None:
         config.llm.default_model = default_model
+
+    # 步骤 5：环境变量中的 0/false/no（忽略大小写）为假，其他字符串均为真。
+    trace_enabled = os.environ.get("KAMA_TRACE_ENABLED")
+    if trace_enabled is not None:
+        config.trace.enabled = trace_enabled.lower() not in ("0", "false", "no")
+
+    trace_file = os.environ.get("KAMA_TRACE_FILE")
+    if trace_file is not None:
+        config.trace.file = trace_file
+
+    trace_payload = os.environ.get("KAMA_TRACE_INCLUDE_LLM_PAYLOAD")
+    if trace_payload is not None:
+        config.trace.include_llm_payload = trace_payload.lower() not in ("0", "false", "no")

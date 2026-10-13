@@ -75,6 +75,8 @@ class EventSubscribeResult(BaseModel):
 # 此处只声明联合类型，不执行校验；业务处理器显式调用各模型的 model_validate。
 # 当前 TCP ping 处理链也没有使用这个别名来分发，它按请求 method 查字典。
 Command = Annotated[
-    PingCommand | AgentRunCommand | EventSubscribeCommand,
+    PingCommand
+    | AgentRunCommand
+    | EventSubscribeCommand,
     Discriminator("type"),
 ]

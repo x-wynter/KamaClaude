@@ -26,4 +26,7 @@ class LLMProvider(Protocol):
         tool_schemas: list[dict[str, object]],
         bus: EventBus,
         run_id: str,
+        *,
+        # S3 新增的仅限关键字参数；Trace 包装器记录轮次，具体 SDK 实现仍按原方式请求。
+        step: int = 0,
     ) -> LlmResponse: ...

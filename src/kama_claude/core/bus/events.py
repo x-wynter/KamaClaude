@@ -97,6 +97,8 @@ class ToolCallFinishedEvent(BaseModel):
     tool_name: str
     # 字段：本次工具调用的耗时，单位毫秒。
     elapsed_ms: int
+    # S3：invoke_tool 填入完整输出，TUI 将其放进可折叠工具块；默认空串兼容旧记录。
+    output: str = ""  # tool result content, for TUI display
     ts: str
 
 

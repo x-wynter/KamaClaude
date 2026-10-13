@@ -102,7 +102,7 @@ class SocketClient:
 
         # 步骤 4：等待接收循环按 ID 填回结果或异常。
         # 本方法不读 socket；必须另有 run_event_loop 任务读取并 set_result。
-        # await 让出执行权，不是阻塞整个进程。S2 此处没有内置请求超时。
+        # await 让出执行权，不是阻塞整个进程。当前此处没有内置请求超时。
         return await fut
 
     # ── 函数：run_event_loop ──

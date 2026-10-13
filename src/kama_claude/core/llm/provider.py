@@ -62,6 +62,9 @@ class AnthropicProvider:
         tool_schemas: list[dict[str, object]],
         bus: EventBus,
         run_id: str,
+        *,
+        # 接受 S3 接口的轮次参数；本实现不使用它选模型或调度任务，trace 包装器会使用。
+        step: int = 0,
     ) -> LlmResponse:
         # 步骤 1：发布本次模型选择事件。
         await bus.publish(

@@ -73,3 +73,68 @@ async def test_shutdown_cancel_restores_handlers(monkeypatch: pytest.MonkeyPatch
         await task
     for sig, handler in previous.items():
         install.assert_any_call(sig, handler)
+
+# 功能：S3 正常退出或等待异常时，都取消全部 run，等收尾后再停服务器和 trace。
+# 设计：运行真实 CoreApp 生命周期，仅替换外部资源与长任务，检查清理顺序及集合移除。
+@pytest.mark.parametrize("wait_fails", [False, True])
+async def test_s3_shutdown_cleans_all_runs(
+    monkeypatch: pytest.MonkeyPatch, wait_fails: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from kama_claude.core import app as app_module
+    from kama_claude.core.config import KamaConfig
+
+    order: list[str] = []
+    both_started = asyncio.Event()
+    started = 0
+
+    class WaitingRunner:
+        # 接受 Core 传入的依赖，只保留本测试需要的可取消行为。
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        # 等两个 run 都启动；取消时模拟 Runner 的结束事件/文件收尾。
+        async def run(self, goal: str, *, run_id: str) -> None:
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                order.append(goal)
+
+    server = Mock()
+    server.start = AsyncMock(return_value="test-address")
+    server.stop = AsyncMock(side_effect=lambda: order.append("server"))
+    trace = Mock()
+    trace.start = AsyncMock()
+    trace.stop = AsyncMock(side_effect=lambda: order.append("trace"))
+    monkeypatch.setattr(app_module, "get_config", lambda: KamaConfig())
+    monkeypatch.setattr(app_module, "setup_logging", lambda config: None)
+    monkeypatch.setattr(app_module, "SocketServer", Mock(return_value=server))
+    monkeypatch.setattr(app_module, "TraceWriter", Mock(return_value=trace))
+    monkeypatch.setattr(app_module, "AgentRunner", WaitingRunner)
+    application = app_module.CoreApp()
+
+    # 在服务接线后提交两个 run；模拟通知返回或等待阶段抛异常。
+    async def wait_for_exit() -> None:
+        await application._agent_run_handler({"goal": "first"})
+        await application._agent_run_handler({"goal": "second"})
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        assert len(application._running_runs) == 2
+        if wait_fails:
+            raise RuntimeError("test wait failure")
+
+    monkeypatch.setattr(app_module, "_wait_for_shutdown", wait_for_exit)
+    if wait_fails:
+        with pytest.raises(RuntimeError, match="test wait failure"):
+            await application.run()
+    else:
+        await application.run()
+    assert set(order[:2]) == {"first", "second"}
+    assert order[2:] == ["server", "trace"]
+    assert not application._running_runs
+    server.stop.assert_awaited_once()
+    trace.stop.assert_awaited_once()

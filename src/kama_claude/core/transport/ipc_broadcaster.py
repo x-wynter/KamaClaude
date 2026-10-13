@@ -11,12 +11,20 @@ import fnmatch
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from pydantic import BaseModel
 
 from kama_claude.core.bus.envelope import EventPushEnvelope
+from kama_claude.core.trace.record import TraceRecord
+from kama_claude.core.trace.writer import TraceWriter
 
 logger = logging.getLogger(__name__)
+
+
+# 为每次已发送的推送生成 trace 时间；不是事件原始 ts。
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 # ── 类：_Subscription ──
@@ -40,10 +48,10 @@ class _Subscription:
 # 字段说明：
 #   _subscriptions：所有连接的订阅记录；每条记录包含连接、主题和范围。
 class IpcEventBroadcaster:
-    # ── 初始化：__init__ ──
-    # 用途：建立本实例的初始状态；字段含义见类上方的说明。
-    def __init__(self) -> None:
+    # 保存可选 trace 与订阅列表；不在此处打开文件或建立网络连接。
+    def __init__(self, trace: TraceWriter | None = None) -> None:
         self._subscriptions: list[_Subscription] = []
+        self._trace = trace
 
     # ── 函数：subscribe ──
     # 用途：注册一个客户端订阅，返回 subscription_id
@@ -90,8 +98,22 @@ class IpcEventBroadcaster:
                 # 模型 → JSON 文本 → UTF-8 字节 → 换行；每个换行结束一条消息。
                 sub.writer.write(envelope.model_dump_json().encode() + b"\n")
                 # drain 等待写缓冲压力缓解，不是客户端已经显示完成的确认。
-                # S2 逐个等待订阅者，慢连接可能拖慢事件发布。
+                # 当前仍逐个等待订阅者，慢连接可能拖慢事件发布。
                 await sub.writer.drain()
+                # 同一个业务事件广播给两位订阅者，会留下两条 push trace。
+                if self._trace is not None:
+                    client_id = str(sub.writer.get_extra_info("peername", "<unknown>"))
+                    self._trace.emit(
+                        TraceRecord(
+                            ts=_now(),
+                            direction="CORE→CLIENT",
+                            layer="ipc",
+                            kind="push",
+                            run_id=run_id,
+                            client_id=client_id,
+                            data={"sub_id": sub.sub_id, "event_type": event_type},
+                        )
+                    )
             except (ConnectionResetError, BrokenPipeError, OSError):
                 logger.debug("dead connection for sub %s, scheduling cleanup", sub.sub_id)
                 dead.append(sub.writer)
