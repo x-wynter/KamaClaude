@@ -1,7 +1,7 @@
 # ═══ 文件职责：给模型接口添加调用前后 trace ═══
 # 协作关系：AgentLoop → TracingProvider → AnthropicProvider；记录异步交给 TraceWriter。
 # 阅读路线：先看构造函数依赖，再顺着 chat 的请求记录、委托、响应记录阅读。
-# 已实现耗时和载荷记录；未实现重试、费用预算、模型路由或异常响应补录。
+# 已实现耗时和载荷记录；未实现重试、费用预算、模型路由。
 
 from __future__ import annotations
 
@@ -71,9 +71,23 @@ class TracingProvider:
         )
 
         # 步骤 2：标准库 monotonic 计时，await 内部 provider 后取得完整 LlmResponse。
-        # inner 若抛异常，这里向上透传；当前不会生成对应 api_response 错误记录。
+        # inner 异常仅记录类型和 HTTP 状态码，再原样抛出；不存异常正文以免泄露凭据。
         t0 = time.monotonic()
-        result = await self._inner.chat(messages, tool_schemas, bus, run_id, step=step)
+        try:
+            result = await self._inner.chat(messages, tool_schemas, bus, run_id, step=step)
+        except Exception as exc:
+            error_data: dict[str, Any] = {
+                "error_type": type(exc).__name__,
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+            }
+            status_code = getattr(exc, "status_code", None)
+            if isinstance(status_code, int):
+                error_data["status_code"] = status_code
+            self._trace.emit(TraceRecord(
+                ts=_now(), direction="LLM→CORE", layer="llm", kind="api_error",
+                run_id=run_id, step=step, data=error_data,
+            ))
+            raise
         latency_ms = int((time.monotonic() - t0) * 1000)
 
         # 步骤 3：dataclasses.asdict 将工具调用/用量对象转为可 JSON 序列化的字典。

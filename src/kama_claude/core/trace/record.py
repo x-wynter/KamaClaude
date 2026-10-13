@@ -24,7 +24,7 @@ class TraceRecord(BaseModel):
         "LLM→CORE",
     ]
     layer: Literal["ipc", "event", "llm"]
-    kind: str  # command / response / error / push / event / api_call / api_response
+    kind: str  # command / response / error / push / event / api_call / api_response / api_error
     # 关联字段均可缺省：IPC 请求/响应通常没有顶层 run_id，不能只按 ID 看完整握手。
     run_id: str | None = None
     step: int | None = None

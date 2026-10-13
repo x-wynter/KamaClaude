@@ -40,11 +40,11 @@ def cmd_trace(
         print(f"trace file not found: {trace_path}", file=sys.stderr)
         sys.exit(1)
 
-    # 步骤 2：内置 open 显式 UTF-8 读取 NDJSON；一行对应一条 TraceRecord。
-    with open(trace_path, encoding="utf-8") as f:
+    # 步骤 2：逐行读取字节；兼容旧 Windows 日志与新 UTF-8 日志混合追加。
+    with open(trace_path, "rb") as f:
         for line in f:
             _process_line(
-                line.strip(),
+                _decode_line(line).strip(),
                 run_id=run_id,
                 layer=layer,
                 direction=direction,
@@ -54,14 +54,14 @@ def cmd_trace(
     # 步骤 3：follow 重新打开并移到文件末尾，之后轮询追加内容。
     # 两次打开之间新增的行可能跳过；当前没有文件轮转处理或消费游标。
     if follow:
-        with open(trace_path, encoding="utf-8") as f:
-            # seek 的 whence=2 表示文件末尾；readline 在暂无新内容时返回空字符串。
+        with open(trace_path, "rb") as f:
+            # seek 的 whence=2 表示文件末尾；readline 在暂无新内容时返回空字节串。
             f.seek(0, 2)
             while True:
                 line = f.readline()
                 if line:
                     _process_line(
-                        line.strip(),
+                        _decode_line(line).strip(),
                         run_id=run_id,
                         layer=layer,
                         direction=direction,
@@ -70,6 +70,17 @@ def cmd_trace(
                 else:
                     # 标准库 sleep 同步阻塞 50ms；本 CLI 没有运行 asyncio 事件循环。
                     time.sleep(0.05)
+
+
+# 优先解码 UTF-8，失败时兼容旧 Windows GBK/GB18030；损坏行提示后跳过。
+def _decode_line(line: bytes) -> str:
+    for encoding in ("utf-8", "gb18030"):
+        try:
+            return line.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    print("warning: skipping undecodable trace line", file=sys.stderr)
+    return ""
 
 
 # 解析单行并根据过滤条件决定是否输出
@@ -156,6 +167,9 @@ def _summarize(record: TraceRecord) -> str:
         tools = data.get("tool_schemas")
         tc = len(tools) if isinstance(tools, list) else data.get("tool_count", "?")
         return f"msgs={count}  tools={tc}"
+
+    if kind == "api_error":
+        return f"error={data.get('error_type')}  status={data.get('status_code', 'n/a')}"
 
     if kind == "api_response":
         usage = data.get("usage", {})

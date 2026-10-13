@@ -154,3 +154,26 @@ async def test_step_forwarded_to_inner_provider(tmp_path: Path) -> None:
     inner.chat.assert_called_once()
     _, kwargs = inner.chat.call_args
     assert kwargs["step"] == 7
+
+
+# 功能：模型异常保存安全诊断信息，同时保持原异常向上传播。
+# 设计：异常正文含模拟秘密，断言日志不含正文且 HTTP 状态码保留。
+async def test_provider_error_trace(tmp_path: Path) -> None:
+    import json
+
+    writer = await _make_writer(tmp_path)
+    inner = AsyncMock()
+    error = RuntimeError("secret-test-token")
+    error.status_code = 401  # type: ignore[attr-defined]
+    inner.chat.side_effect = error
+    provider = TracingProvider(inner, writer)
+    with pytest.raises(RuntimeError) as caught:
+        await provider.chat([], [], EventBus(), "failed-run", step=1)
+    assert caught.value is error
+    await writer.stop()
+    text = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+    record = json.loads(text.splitlines()[-1])
+    assert record["kind"] == "api_error"
+    assert record["data"]["error_type"] == "RuntimeError"
+    assert record["data"]["status_code"] == 401
+    assert "secret-test-token" not in text

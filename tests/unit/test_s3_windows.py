@@ -46,3 +46,19 @@ async def test_trace_utf8_writer_and_cli(tmp_path: Path, capsys: pytest.CaptureF
     record = json.loads(capsys.readouterr().out)
     assert record["direction"] == "CORE→LLM"
     assert record["data"]["goal"] == "阅读🧭"
+
+
+# 功能：同一文件混合旧 GBK 和新 UTF-8 记录时均能读取。
+# 设计：方向箭头和中文覆盖真实旧日志，emoji 保证新行必须按 UTF-8 解码。
+def test_trace_mixed_encodings(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "mixed.jsonl"
+    old = TraceRecord(ts="now", direction="CLIENT→CORE", layer="ipc",
+                      kind="command", data={"goal": "旧中文"})
+    new = old.model_copy(update={"data": {"goal": "新中文🧭"}})
+    path.write_bytes(old.model_dump_json().encode("gbk") + b"\n"
+                     + new.model_dump_json().encode("utf-8") + b"\n")
+    config = KamaConfig()
+    config.trace.file = str(path)
+    cmd_trace(None, config, raw=True)
+    lines = capsys.readouterr().out.splitlines()
+    assert [json.loads(line)["data"]["goal"] for line in lines] == ["旧中文", "新中文🧭"]

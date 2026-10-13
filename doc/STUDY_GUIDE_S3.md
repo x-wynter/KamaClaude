@@ -423,7 +423,7 @@ trace 不是另一套业务状态，也不是恢复执行的事务日志。CLI t
 
 1. 根据 include_payload 选择 messages/tool_schemas 或仅数量。
 2. emit api_call，取 monotonic 起点。
-3. await inner.chat，原样传递 step。
+3. await inner.chat，原样传递 step。若抛出普通异常，记录 api_error（异常类型、可用的 HTTP 状态码、耗时），再原样抛出；不保存异常正文或请求头。
 4. 算 latency_ms，用 dataclasses.asdict 转换工具调用和用量，emit api_response。
 5. 原样返回 LlmResponse，Loop 不需要知道启没启 trace。
 
@@ -449,7 +449,7 @@ emit 不等待落盘；join 等每个 put 对应的 task_done，不是等文件�
 
 ### 7.6 trace CLI
 
-cmd_trace 展开文件路径，逐行 UTF-8 读取；_process_line 校验 TraceRecord，再依次应用 run/layer/direction 条件。raw 输出原 JSON 行，默认输出彩色摘要。
+cmd_trace 展开文件路径，逐行读取字节，优先按 UTF-8 解码，失败时尝试 GB18030（兼容旧 Windows GBK 日志）；_process_line 校验 TraceRecord，再依次应用 run/layer/direction 条件。raw 输出原 JSON 行，默认输出彩色摘要。
 
 follow 初次读完后重新打开并 seek 到末尾，再轮询。两次打开之间新增行可能跳过，也不处理文件轮转。time.sleep(0.05) 同步阻塞适用于这个独立 CLI 路径，它没有运行 asyncio 事件循环。
 
