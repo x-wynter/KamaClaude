@@ -31,7 +31,7 @@ class TraceWriter:
     # 等待队列清空后取消 drain task
     async def stop(self) -> None:
         # 步骤 1：join 等待每次 put 都对应 task_done，避免先取消造成队列尾部丢失。
-        await self._queue.join()
+        await self._queue.join()  # 等待未完成数变成 0
         # 步骤 2：取消正在等下一条记录的消费者，再 await 回收它。
         if self._task is not None:
             self._task.cancel()
