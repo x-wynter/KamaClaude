@@ -1,8 +1,8 @@
-# KamaClaude 项目架构地图
+# KamaClaude 项目架构地图（S4）
 
-> 对照当前 `study/s3` 源码整理，更新日期：2026-10-14。包含本学习分支的 Windows 兼容修复与 Trace 异常诊断；不把后续阶段规划当作已实现功能。
+> 对照当前 `study/s4` 源码整理，更新日期：2026-10-14。包含本学习分支的 Windows 兼容修复与 Trace 异常诊断；不把后续阶段规划当作已实现功能。
 >
-> 本文先建立全局关系，再提供逐文件索引。具体语法和逐步实现请配合 [S3 学习指南](STUDY_GUIDE_S3.md) 阅读。
+> 本文先建立全局关系，再提供逐文件索引。具体语法和逐步实现请配合 [S4 学习指南](STUDY_GUIDE_S4.md) 阅读。
 
 ## 目录
 
@@ -62,7 +62,7 @@ flowchart TB
 | `uv run kama-core` | `core.app:run` | 启动 Core 及其事件循环，持续接收请求 |
 | `uv run kama-tui` | `tui.__main__:main` | 启动 Textual 界面，订阅并展示事件 |
 
-CLI 不在自己的进程中执行 AgentLoop。`kama run` 需要已有的 Core 服务。TUI 在 S3 中是观察界面，没有输入目标的输入框。
+CLI 不在自己的进程中执行 AgentLoop。`kama run` 需要已有的 Core 服务。TUI 在 S4 有多行输入框，创建 chat session 并提交消息；CLI 另有 kama chat。
 
 并非所有 CLI 命令都连接 Core：`kama trace` 直接读日志文件，`--version` 直接读版本号；`core start` 则会启动另一个进程。
 
@@ -79,7 +79,10 @@ Core 中通常有一个由 `asyncio.run` 驱动的事件循环，它调度连接
 ```mermaid
 flowchart TB
     S["SocketServer：接收和分发 RPC"] --> A["CoreApp：服务组装与命令处理"]
-    A --> R["AgentRunner：准备和收尾一次 run"]
+    A --> S["SessionManager：会话与每轮输入"]
+    S --> R["AgentRunner：准备和收尾一次 run"]
+    S --> D["SessionStore：thread / notes / meta"]
+    R --> D
     R --> L["AgentLoop：反复问模型并执行工具"]
     L <--> C["ExecutionContext：消息历史和运行状态"]
     L --> P["Provider：调用模型"]
@@ -118,7 +121,7 @@ sequenceDiagram
     C->>S: event.subscribe
     S-->>C: 订阅结果
     C->>S: agent.run(goal)
-    S->>R: create_task 启动 run
+    S->>R: one_shot 会话后台启动 run
     S-->>C: 返回 run_id
     R->>P: messages + 工具说明
     P-->>R: tool_use：read_file
@@ -135,14 +138,14 @@ sequenceDiagram
 1. `cli/main.py` 解析 `--goal`，调用 `cli/commands/run.py`。
 2. CLI 创建 SocketClient，启动接收循环，先订阅事件，再发 `agent.run`。
 3. SocketServer 解析 NDJSON 行、校验 JSON-RPC 外壳，按 method 找 CoreApp 的 handler。
-4. CoreApp 校验目标参数，分配 `run_id`，创建 Runner 的异步任务，返回 ID。
-5. Runner 创建运行目录、TaskManager、ExecutionContext、EventWriter、Provider 和八个工具。
+4. CoreApp 创建 one_shot 会话，分配 `run_id`，后台执行 SessionManager.send_message，返回 ID。
+5. Manager 先写用户消息；Runner 读取会话历史/笔记，创建运行目录、Context、EventWriter、Provider 和九个工具。
 6. Loop 把 `context.messages` 和工具 schema 发给 Provider。启用 Trace 时，外面还有 TracingProvider 包装。
 7. 模型返回 `tool_use`，Loop 保存 assistant 消息，再调用 `invoke_tool`。
 8. `invoke_tool` 查表、检查必填参数、控制超时、发布工具事件，调用具体工具的 `invoke`。
 9. 工具返回 ToolResult。Context 把结果关联到对应 `tool_use_id`，追加为后续模型可读的消息。
 10. 下一轮模型看到文件内容后给出总结；`end_turn` 时 Loop 标记成功，Runner 发布结束事件并关闭事件文件。
-11. CLI 收到 `run.finished` 后退出；Core 继续运行，等待其他请求。
+11. CLI 收到 `run.finished` 后退出；Runner 保存新增模型消息，Manager 自动关闭 one_shot。chat 则进入 waiting_for_input。
 
 ### 三类消息不要混在一起
 
@@ -193,29 +196,33 @@ EventBus 保存回调列表，`publish` 按注册顺序逐个 `await handler(eve
 
 | 范围 | 对象 | 含义 |
 | --- | --- | --- |
-| 整个 daemon | CoreApp、EventBus、广播器、TraceWriter | 多次 run 共用 |
+| 整个 daemon | CoreApp、EventBus、广播器、TraceWriter、SessionManager | 多次 run 共用 |
+| 每个 session | Session、asyncio.Lock、thread/notes 文件 | 串起多次 run；Manager 在内存保存索引 |
 | 每次 run | Runner、ExecutionContext、工具注册表、TaskManager、EventWriter | 管理这一次执行及其记录 |
 | 每条连接 | StreamReader/StreamWriter、订阅关联信息 | 管理与一个客户端的通信 |
 | 每次模型调用 | LlmResponse、工具调用块、用量数据 | Loop 接收后更新上下文 |
 
-### 四种磁盘记录
+### 磁盘记录
 
 | 文件或目录 | 谁写 | 内容与用途 |
 | --- | --- | --- |
-| `runs/<run_id>/events.jsonl` | EventWriter | 业务事件流；Core 可读取它向界面回放 |
-| `runs/<run_id>/.tasks/task_N.json` | TaskManager | 待办当前状态，包含依赖；不是工具调用日志 |
+| `~/.kama/sessions/<sid>/runs/<run_id>/events.jsonl` | EventWriter | 业务事件流；Core 可读取它向界面回放 |
+| `~/.kama/sessions/<sid>/runs/<run_id>/.tasks/task_N.json` | TaskManager | 待办当前状态，包含依赖；不是工具调用日志 |
+| `~/.kama/sessions/<sid>/meta.json` | SessionManager 经 Store | 会话状态、模式、标题和 run_ids |
+| `~/.kama/sessions/<sid>/thread.jsonl` | Manager/Runner 经 Store | 用户、模型和工具结果消息 |
+| `~/.kama/sessions/<sid>/notes.md` | note_save 经 Store | 主动笔记，无自动摘要或检索 |
 | `~/.kama/traces/daemon.jsonl` | TraceWriter | 多次运行的 ipc/event/llm 时间线；默认路径可配置 |
 | `~/.kama/logs/core.log` | logging 配置的文件处理器 | 服务启动、连接等普通运行日志；默认路径可配置 |
 
-`~` 是用户目录。`runs` 和工具的相对文件路径以 **Core 进程的工作目录** 为基准，不以源码所在目录、也不自动以每次 CLI 的目录为基准。学习时从项目根目录启动 Core，有助于避免读错文件。
+`~` 是用户目录。无会话的直接 Runner 调用仍可使用相对 `runs/`，daemon 的 S4 路径则位于会话目录。`runs` 和工具的相对文件路径以 **Core 进程的工作目录** 为基准，不以源码所在目录、也不自动以每次 CLI 的目录为基准。学习时从项目根目录启动 Core，有助于避免读错文件。
 
 Runner 初始化 TaskManager 时会创建 `.tasks` 目录；只有调用 `task_create` 才会出现待办文件。TaskManager 将某待办标记 completed 时会清除其他条目对它的依赖，但不会自动开始执行后续条目。
 
-Context 的模型消息历史主要保存在内存；事件回放是重新显示历史事件，不是恢复模型上下文并继续执行。
+Context 每轮从 thread 预填完整历史，结束追加新增消息；notes 下一轮注入 system。事件回放仍只是显示事件；Core 重启不恢复 Manager 的会话索引。
 
 ## 7. 源文件逐个索引
 
-以下覆盖当前 `src/` 中全部 **57 个 Python 文件及 1 个 `py.typed` 标记文件**。每一行都可以点击进入源码。包初始化文件单独说明，避免误以为导入一个包就会启动服务。
+以下覆盖当前 `src/` 中全部 **63 个 Python 文件及 1 个 `py.typed` 标记文件**。每一行都可以点击进入源码。包初始化文件单独说明，避免误以为导入一个包就会启动服务。
 
 ### 7.1 包入口与 CLI
 
@@ -239,11 +246,11 @@ Context 的模型消息历史主要保存在内存；事件回放是重新显示
 | --- | --- |
 | [core/__init__.py](../src/kama_claude/core/__init__.py) | Core 子包标记，不会因导入而启动服务。 |
 | [core/__main__.py](../src/kama_claude/core/__main__.py) | 支持 `python -m kama_claude.core`，调用 app.run。 |
-| [core/app.py](../src/kama_claude/core/app.py) | `CoreApp` 组装共享服务，注册三个 RPC，启动 run，订阅/回放事件，采集 event Trace；退出时取消活动 run、关闭服务与 Trace。同步 run 函数启动事件循环。 |
+| [core/app.py](../src/kama_claude/core/app.py) | `CoreApp` 组装共享服务，注册七个 RPC，启动 run，订阅/回放事件，采集 event Trace；退出时取消活动 run、关闭服务与 Trace。同步 run 函数启动事件循环。 |
 | [core/config.py](../src/kama_claude/core/config.py) | 定义配置 dataclass；`get_config` 合并默认值、TOML、dotenv/环境变量并校验配置。已有环境变量优先于 .env。不同进程分别加载配置。 |
 | [core/logging_setup.py](../src/kama_claude/core/logging_setup.py) | 设置 Python logging 的级别、终端/文件处理器及格式，支持配置的结构化输出；与业务 EventBus 是不同机制。 |
 | [core/runs.py](../src/kama_claude/core/runs.py) | 规定 runs 路径、events 文件路径，生成 UTC 时间加随机后缀的 run_id，并提供建目录辅助函数。 |
-| [core/runner.py](../src/kama_claude/core/runner.py) | `AgentRunner` 准备一次运行的 Context、Provider、八个工具和 TaskManager；管理 EventWriter 生命周期和起止事件；`run_and_capture` 返回 RunOutcome。 |
+| [core/runner.py](../src/kama_claude/core/runner.py) | `AgentRunner` 准备一次运行的 Context、Provider、八个基础工具及会话专属 note_save、TaskManager；管理 EventWriter 生命周期和起止事件；`run_and_capture` 返回 RunOutcome。 |
 | [core/loop.py](../src/kama_claude/core/loop.py) | `AgentLoop.run` 推进模型轮次、保存响应、顺序执行工具、追加工具结果，按 end_turn/步数上限/模型异常更新状态。 |
 | [core/context.py](../src/kama_claude/core/context.py) | `ExecutionContext` 保存运行状态和消息历史；提供添加 assistant/tool result、查询完成状态和标记成功/失败的方法。 |
 
@@ -252,9 +259,9 @@ Context 的模型消息历史主要保存在内存；事件回放是重新显示
 | 源文件 | 实现功能 |
 | --- | --- |
 | [core/bus/__init__.py](../src/kama_claude/core/bus/__init__.py) | 集中导出部分协议模型、事件模型和错误码；不是消息分发器。 |
-| [core/bus/commands.py](../src/kama_claude/core/bus/commands.py) | 定义 core.ping、agent.run、event.subscribe 的参数/结果模型及 Command 联合类型；模型定义不会自动注册 handler。 |
+| [core/bus/commands.py](../src/kama_claude/core/bus/commands.py) | 定义 core.ping、agent.run、event.subscribe 和四个 session 命令的参数/结果模型及 Command 联合类型；模型定义不会自动注册 handler。 |
 | [core/bus/envelope.py](../src/kama_claude/core/bus/envelope.py) | 定义 JSON-RPC 请求、成功/错误响应、事件推送外壳，以及 HandlerError、错误码、make_error。 |
-| [core/bus/events.py](../src/kama_claude/core/bus/events.py) | 定义 run、step、tool、llm、core、log 等事件的数据字段及 Event 联合类型；有数据类型不等于所有路径都会发布它。 |
+| [core/bus/events.py](../src/kama_claude/core/bus/events.py) | 定义 session、run、step、tool、llm、core、log 等事件的数据字段及 Event 联合类型；有数据类型不等于所有路径都会发布它。 |
 
 ### 7.4 网络传输
 
@@ -282,7 +289,7 @@ Context 的模型消息历史主要保存在内存；事件回放是重新显示
 | [core/llm/types.py](../src/kama_claude/core/llm/types.py) | 定义 UsageStats、ToolCallBlock 和 LlmResponse 数据类，统一 SDK 输出与 Loop 输入；这里的工具块不是 TUI 控件。 |
 | [core/llm/provider.py](../src/kama_claude/core/llm/provider.py) | `AnthropicProvider` 调用异步 SDK，准备系统提示和工具定义，消费流式文本并发布模型事件，提取工具调用、结束原因和用量，返回 LlmResponse。 |
 
-### 7.7 工具框架与八个内置工具
+### 7.7 工具框架与九个内置工具
 
 | 源文件 | 实现功能 |
 | --- | --- |
@@ -290,7 +297,7 @@ Context 的模型消息历史主要保存在内存；事件回放是重新显示
 | [core/tools/base.py](../src/kama_claude/core/tools/base.py) | 定义工具契约及 ToolResult，约定名称、描述、输入 schema 与异步 invoke；不包含具体读文件等业务。 |
 | [core/tools/registry.py](../src/kama_claude/core/tools/registry.py) | `ToolRegistry` 注册/查找工具，并把各工具的说明组装成发给模型的 schema 列表。 |
 | [core/tools/invocation.py](../src/kama_claude/core/tools/invocation.py) | `invoke_tool` 统一处理查找、必填参数检查、超时、异常及工具起止事件；实际执行交给 tool.invoke。 |
-| [core/tools/builtin/__init__.py](../src/kama_claude/core/tools/builtin/__init__.py) | 导出八个工具类；真正实例化和注册发生在 Runner._build_registry。 |
+| [core/tools/builtin/__init__.py](../src/kama_claude/core/tools/builtin/__init__.py) | 导出九个工具类；真正实例化和注册发生在 Runner._build_registry。 |
 | [core/tools/builtin/read_file.py](../src/kama_claude/core/tools/builtin/read_file.py) | `ReadFileTool` 检查路径、读取文件，按上限截取返回内容，用 UTF-8 解码；不自动创建待办。 |
 | [core/tools/builtin/write_file.py](../src/kama_claude/core/tools/builtin/write_file.py) | `WriteFileTool` 检查路径和内容大小，创建父目录，以 UTF-8 覆盖写入文本。 |
 | [core/tools/builtin/list_dir.py](../src/kama_claude/core/tools/builtin/list_dir.py) | `ListDirTool` 遍历目录并返回树形文字，限制深度及条目数。 |
@@ -323,13 +330,24 @@ Context 的模型消息历史主要保存在内存；事件回放是重新显示
 | --- | --- |
 | [tui/__init__.py](../src/kama_claude/tui/__init__.py) | TUI 子包标记。 |
 | [tui/__main__.py](../src/kama_claude/tui/__main__.py) | 解析 --replay，加载连接配置并启动 KamaTuiApp；也是 kama-tui 命令入口。 |
-| [tui/app.py](../src/kama_claude/tui/app.py) | Textual 的 KamaTuiApp 管理连接、订阅、重连和事件展示；LLMStreamBlock 拼接流式文本，ToolCallBlock 展示可折叠的参数/结果；当前没有目标输入或待办看板。 |
+| [tui/app.py](../src/kama_claude/tui/app.py) | Textual 的 KamaTuiApp 管理连接、订阅、重连和事件展示；LLMStreamBlock 拼接流式文本，ToolCallBlock 展示可折叠的参数/结果；ChatTextArea 提交多行输入并管理 busy 状态；尚无待办看板。 |
+
+### 7.11 S4 新增源文件与协作关系
+
+| 源文件 | 实现功能与协作 |
+| --- | --- |
+| [cli/commands/chat.py](../src/kama_claude/cli/commands/chat.py) | CLI 多轮入口，线程池等待 input；SocketClient 订阅与提交，ChatPrinter 展示事件。 |
+| [core/session/__init__.py](../src/kama_claude/core/session/__init__.py) | 导出 Session、Manager、Store 和类型；不自动创建会话。 |
+| [core/session/model.py](../src/kama_claude/core/session/model.py) | 元数据 dataclass 与字典转换；Manager 更新，Store 保存。 |
+| [core/session/manager.py](../src/kama_claude/core/session/manager.py) | 内存会话索引、每会话锁、用户消息持久化与 Runner 工厂；发布会话事件。 |
+| [core/session/store.py](../src/kama_claude/core/session/store.py) | UTF-8 meta/thread/notes 读写；剥离模型消息元数据并裁剪孤立工具尾部。 |
+| [core/tools/builtin/note_save.py](../src/kama_claude/core/tools/builtin/note_save.py) | Runner 绑定会话和 run；模型调用后通过 Store 追加笔记，下一轮注入 system。 |
 
 ## 8. 当前实现的边界
 
 这些边界有助于正确理解架构，不能根据目录或类名推断出更强的能力。
 
-- 当前注册的 RPC 只有 `core.ping`、`agent.run`、`event.subscribe`；`task_create` 是模型工具，不是 `task.create` RPC。
+- 当前注册七个 RPC：`core.ping`、`agent.run`、`event.subscribe` 与 `session.create/send_message/get_history/close`；`task_create` 是模型工具，不是 `task.create` RPC。
 - 工具由模型选择调用。提到文件名不会让程序自动读文件；模型可以直接返回文字。
 - 待办支持状态和依赖记录，但没有自动调度、依赖环检测或严格的依赖执行门禁。
 - Core 可以同时接收多个 run，但隔离仍不完整：EventWriter 订阅共享总线时没有按 run_id 过滤，CLI 的全局事件回调也没有按自己的 run_id 过滤；TUI 流文本没有完整的多 run 隔离。学习和验证时先顺序运行。
@@ -339,11 +357,14 @@ Context 的模型消息历史主要保存在内存；事件回放是重新显示
 - 当前工具的路径检查不是完整的文件系统沙箱；bash 也没有交互审批机制。
 - Windows `core stop` 使用的终止方式可能直接结束进程，不能假设一定走完协程清理。学习关闭流程可从前台 Core 的 Ctrl+C 路径观察。
 
+- Core 重启不自动恢复旧会话索引；TUI 重连会创建新 session。完整历史读回不等于自动压缩或语义检索。
+- session.send_message 同步等待该轮结束；同连接的后续 close 要等前一请求完成，不是取消 RPC。
+
 ## 9. 推荐学习路线
 
 ### 第一遍只看五个文件
 
-按 [cli/commands/run.py](../src/kama_claude/cli/commands/run.py) → [core/app.py](../src/kama_claude/core/app.py) → [core/runner.py](../src/kama_claude/core/runner.py) → [core/loop.py](../src/kama_claude/core/loop.py) → [core/context.py](../src/kama_claude/core/context.py) 阅读。
+先读 [session/manager.py](../src/kama_claude/core/session/manager.py) 与 [session/store.py](../src/kama_claude/core/session/store.py)，再按 [cli/commands/run.py](../src/kama_claude/cli/commands/run.py) → [core/app.py](../src/kama_claude/core/app.py) → [core/runner.py](../src/kama_claude/core/runner.py) → [core/loop.py](../src/kama_claude/core/loop.py) → [core/context.py](../src/kama_claude/core/context.py) 阅读。
 
 每个文件只回答三个问题：谁调用我？我保存什么状态？我把工作交给谁？第一次不要停在每个类型标注和库函数上。
 

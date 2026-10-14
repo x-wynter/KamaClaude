@@ -111,14 +111,14 @@ The planning documents live in `../docs/` (sibling of this repo, not committed h
 - `s0_implementation_plan.md` — detailed S0 decisions and rationale
 - `agent_functional_outline.md` — full feature catalogue
 
-## S3 learning branch
 
-`AgentRunner` registers eight tools. Four `task_*` tools share a per-run file-backed
-`TaskManager`; they are not `task.*` RPC handlers or an automatic task scheduler.
-Unified trace captures IPC, EventBus events and LLM calls. TUI displays streaming
-text and collapsible tool blocks; it has no input box in S3.
+## S4 learning branch
 
-See `doc/STUDY_GUIDE_S3.md` and `doc/S3_VALIDATION.md` for the current implementation,
-Windows adaptations and offline validation. `tests/offline_daemon.py` substitutes
-only the model boundary in local daemon tests. The separate `test_run_e2e.py` calls
-a real model and must only be run intentionally with credentials.
+CoreApp creates SessionManager/SessionStore. Each message gets a new Runner;
+chat sessions persist thread and notes across runs. Session runs register nine
+tools including note_save; task tools remain per-run and are not a scheduler.
+TUI has a multi-line input box. See doc/STUDY_GUIDE_S4.md and doc/S4_VALIDATION.md.
+Windows signal/PID/startup fixes and legacy trace decoding remain applicable.
+Core shutdown cancels and awaits both one_shot and chat runs before trace shutdown.
+Tests use tests/offline_daemon.py with a fake model and temporary HOME/cwd.
+Do not collect test_run_e2e.py for offline validation or load project .env secrets.

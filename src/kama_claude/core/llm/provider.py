@@ -65,6 +65,7 @@ class AnthropicProvider:
         *,
         # 接受 S3 接口的轮次参数；本实现不使用它选模型或调度任务，trace 包装器会使用。
         step: int = 0,
+        system: str | None = None,  # S4 调用方可注入会话指令；None 时用默认提示。
     ) -> LlmResponse:
         # 步骤 1：发布本次模型选择事件。
         await bus.publish(
@@ -74,8 +75,12 @@ class AnthropicProvider:
         # 步骤 2：准备系统提示和工具说明。
         # 系统提示使用块列表格式；cache_control 是发送给服务的请求字段。
         # 这里没有把模型缓存保存在本地 Python 字典中。
-        system: list[dict[str, object]] = [
-            {"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+        system_blocks: list[dict[str, object]] = [
+            {
+                "type": "text",
+                "text": system or _SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            },
         ]
 
         # list 只复制外层列表；后面再复制最后一个字典，避免修改注册表的 schema。
@@ -94,7 +99,7 @@ class AnthropicProvider:
         kwargs: dict[str, object] = {
             "model": self._model,
             "max_tokens": 4096,
-            "system": system,
+            "system": system_blocks,
             "messages": messages,
         }
         # 空列表不传 tools 参数；非空时追加到请求字典。

@@ -66,6 +66,12 @@ class AgentLoop:
                     run_id=context.run_id,
                     # S3 将轮次传给 provider 包装器，用于把 LLM trace 对应到本步。
                     step=context.step,
+                    system=context.system_prompt(
+                        "You are a helpful AI assistant. "
+                        "Use the available tools to complete the user's goal. "
+                        "When the goal is fully achieved, respond with a final answer "
+                        "and do not call any more tools."
+                    ),
                 )
             # 裸 raise 重新抛出当前异常，让 Runner 执行取消收尾。
             except asyncio.CancelledError:

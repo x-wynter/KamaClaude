@@ -19,6 +19,9 @@ class ExecutionContext:
     run_id: str
     goal: str
     max_steps: int
+    # Runner 从 Store 读取的完整历史；优先于单条 goal，防止重复插入本轮用户消息。
+    prefill_messages: list[dict[str, Any]] = field(default_factory=list)
+    session_notes: str = ""  # 本轮开始时的笔记快照，system_prompt 读取它。
     # default_factory 每次创建新列表，防止不同任务共享同一份消息历史。
     messages: list[dict[str, Any]] = field(default_factory=list)
     # 字段：已进入的模型请求轮数，由 Loop 递增。
@@ -30,13 +33,25 @@ class ExecutionContext:
     # S3：Loop 在 end_turn 时写最终文本，Runner 通过 RunOutcome 返回；不含此前所有思考片段。
     result: str = ""
 
-    # ── 函数：__post_init__ ──
-    # 用途：初始化时将 goal 作为第一条用户消息写入消息历史
-    # dataclass 自动生成的 __init__ 完成字段赋值后会调用此方法。
+    # 初始化消息历史，优先使用 session 完整回放内容
     def __post_init__(self) -> None:
-        # 空列表布尔值为 False；调用方已提供非空历史时，不再重复插入目标。
-        if not self.messages:
+        if self.prefill_messages:
+            # 内置 dict 做浅复制；嵌套 content 列表仍可能共享，不是 deepcopy。
+            self.messages = [dict(m) for m in self.prefill_messages]
+        elif not self.messages:
             self.messages.append({"role": "user", "content": self.goal})
+
+    # 返回当前 run 的 system prompt，必要时注入 session notes
+    def system_prompt(self, base: str) -> str:
+        # base 是 Loop 传入的基本指令；有笔记才附加 Session Notes 与记笔记提示。
+        if not self.session_notes.strip():
+            return base
+        return (
+            base
+            + "\n\n## Session Notes\n"
+            + self.session_notes.strip()
+            + "\n\nRemember important durable facts by calling note_save."
+        )
 
     # ── 函数：add_assistant_message ──
     # 用途：将 LLM 响应的 content blocks 追加为 assistant 消息

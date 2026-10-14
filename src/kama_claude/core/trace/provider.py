@@ -47,11 +47,13 @@ class TracingProvider:
         run_id: str,
         *,
         step: int = 0,
+        # 包装器必须透传 S4 system，否则笔记虽在 Context 中却到不了真正模型。
+        system: str | None = None,
     ) -> LlmResponse:
         # 步骤 1：选择请求载荷或计数摘要；这里只捕获项目接口参数，并非 SDK 原始 HTTP。
         call_data: dict[str, Any]
         if self._include_payload:
-            call_data = {"messages": messages, "tool_schemas": tool_schemas}
+            call_data = {"messages": messages, "tool_schemas": tool_schemas, "system": system}
         else:
             call_data = {
                 "message_count": len(messages),
@@ -74,7 +76,9 @@ class TracingProvider:
         # inner 异常仅记录类型和 HTTP 状态码，再原样抛出；不存异常正文以免泄露凭据。
         t0 = time.monotonic()
         try:
-            result = await self._inner.chat(messages, tool_schemas, bus, run_id, step=step)
+            result = await self._inner.chat(
+                messages, tool_schemas, bus, run_id, step=step, system=system
+            )
         except Exception as exc:
             error_data: dict[str, Any] = {
                 "error_type": type(exc).__name__,

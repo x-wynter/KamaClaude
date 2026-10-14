@@ -22,6 +22,7 @@ class OfflineProvider:
         run_id: str,
         *,
         step: int = 0,
+        system: str | None = None,
     ) -> LlmResponse:
         return LlmResponse(stop_reason="end_turn", text="offline test complete")
 

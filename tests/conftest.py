@@ -53,6 +53,9 @@ async def running_daemon(free_port: int, tmp_path: Path) -> AsyncGenerator[subpr
     env["KAMA_CONFIG"] = str(tmp_path / "absent.toml")
     env["KAMA_TRACE_FILE"] = str(tmp_path / "trace.jsonl")
     env["KAMA_HOST"] = "127.0.0.1"
+    # S4 会话固定写入用户目录；子进程使用临时 HOME，避免污染真实会话。
+    env["USERPROFILE"] = str(tmp_path)
+    env["HOME"] = str(tmp_path)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
     # Popen 启动子进程后立即返回；sys.executable 保证使用当前测试解释器。
     # 参数用列表传入，无需拼接 shell 命令；-m 表示按模块名运行。

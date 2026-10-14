@@ -1,5 +1,5 @@
 # ═══ 文件职责：命令行参数解析与功能分发 ═══
-# 协作关系：kama 命令 → main → 对应 cmd_* 函数；run/ping 再与 Core 通信。
+# 协作关系：kama 命令 → main → 对应 cmd_* 函数；run/chat/ping 再与 Core 通信。
 # 阅读路线：定义参数 → 解析参数 → 加载配置 → 按子命令调用函数。
 # 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from kama_claude.cli.commands.chat import cmd_chat
 from kama_claude.cli.commands.core import cmd_core_start, cmd_core_status, cmd_core_stop
 from kama_claude.cli.commands.ping import cmd_ping
 from kama_claude.cli.commands.run import cmd_run
@@ -35,6 +36,7 @@ def main() -> None:
     # -h/--help 会显示帮助并退出；非法参数通常在这里报错并退出。
 
     subparsers.add_parser("ping", help="Ping the core daemon")
+    subparsers.add_parser("chat", help="Start a multi-turn chat session")
 
     run_parser = subparsers.add_parser("run", help="Run an agent task")
     run_parser.add_argument("--goal", required=True, help="Goal for the agent to accomplish")
@@ -69,6 +71,8 @@ def main() -> None:
     # 步骤 5：选择并调用对应功能入口。
     if args.command == "ping":
         cmd_ping(config)
+    elif args.command == "chat":
+        cmd_chat(config)
     elif args.command == "run":
         cmd_run(args.goal, config)
     elif args.command == "core":

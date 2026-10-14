@@ -33,6 +33,7 @@ class TaskScenarioProvider:
         run_id: str,
         *,
         step: int = 0,
+        system: str | None = None,
     ) -> LlmResponse:
         assert {s["name"] for s in tool_schemas} == {
             "read_file", "bash", "write_file", "list_dir",

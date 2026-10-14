@@ -1,6 +1,6 @@
 # ═══ 文件职责：运行过程中各类事件的数据模型 ═══
 # 协作关系：生产者构造事件 → EventBus → 文件/广播订阅者；本文件只定义数据结构。
-# 阅读路线：按核心、任务、步骤、工具、模型、日志六类阅读，最后看 Event 联合。
+# 阅读路线：核心、运行、步骤、工具、模型、日志与会话事件，最后看 Event 联合。
 # 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
 
 # ── 依赖导入 ──
@@ -172,6 +172,46 @@ class LogLineEvent(BaseModel):
     ts: str
 
 
+# 会话事件由 SessionManager 发布；共享 session_id/ts，不一定具有 run_id。
+# created=新建，message_received=用户消息已写入，resumed=等待后的再次输入。
+# waiting_for_input/closed 在 run 返回之后发布，不代表所有业务待办已完成。
+class SessionCreatedEvent(BaseModel):
+    type: Literal["session.created"] = "session.created"
+    session_id: str
+    mode: str
+    ts: str
+
+
+# 用户消息已追加到 thread 后发布；content 是原始输入，尚非模型结果。
+class SessionMessageReceivedEvent(BaseModel):
+    type: Literal["session.message_received"] = "session.message_received"
+    session_id: str
+    content: str
+    ts: str
+
+
+# 本轮 Runner 已返回，chat 可再输入；last_run_id 关联该轮，不保证该轮成功。
+class SessionWaitingForInputEvent(BaseModel):
+    type: Literal["session.waiting_for_input"] = "session.waiting_for_input"
+    session_id: str
+    last_run_id: str
+    ts: str
+
+
+# waiting_for_input 后收到新消息；表示续聊通知，不是从磁盘恢复会话。
+class SessionResumedEvent(BaseModel):
+    type: Literal["session.resumed"] = "session.resumed"
+    session_id: str
+    ts: str
+
+
+# one_shot 自动关闭或显式 close 时发布；ts 为状态变化时间。
+class SessionClosedEvent(BaseModel):
+    type: Literal["session.closed"] = "session.closed"
+    session_id: str
+    ts: str
+
+
 # 根据 type 字段决定事件类型的判别联合
 # Annotated 附加按 type 判别的元数据；S1 已有多种事件，解析时按 type 选择具体模型。
 # A | B 表示可以是 A 或 B；Annotated 在类型之外附加 Pydantic 的判别规则。
@@ -188,6 +228,11 @@ Event = Annotated[
     | LlmTokenEvent
     | LlmUsageEvent
     | LlmModelSelectedEvent
-    | LogLineEvent,
+    | LogLineEvent
+    | SessionCreatedEvent
+    | SessionMessageReceivedEvent
+    | SessionWaitingForInputEvent
+    | SessionResumedEvent
+    | SessionClosedEvent,
     Discriminator("type"),
 ]

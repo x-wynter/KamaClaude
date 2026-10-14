@@ -29,4 +29,6 @@ class LLMProvider(Protocol):
         *,
         # S3 新增的仅限关键字参数；Trace 包装器记录轮次，具体 SDK 实现仍按原方式请求。
         step: int = 0,
+        # S4：Loop 传入包含会话笔记的系统指令；Protocol 只约定接口，不请求网络。
+        system: str | None = None,
     ) -> LlmResponse: ...

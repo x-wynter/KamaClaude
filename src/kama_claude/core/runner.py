@@ -1,5 +1,5 @@
 # ═══ 文件职责：一次 Agent 任务的准备与收尾 ═══
-# 协作关系：CoreApp 创建 Runner；Runner 组装 Context、Provider、工具和事件文件，再调用 Loop。
+# 协作关系：CoreApp 的会话工厂创建 Runner；Runner 组装 Context/工具/Provider 并调用 Loop。
 # 阅读路线：构造依赖 → _build_registry → run_and_capture；run 只是兼容的无返回值包装。
 # 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
 
@@ -20,10 +20,13 @@ from kama_claude.core.llm.base import LLMProvider
 from kama_claude.core.llm.provider import AnthropicProvider
 from kama_claude.core.loop import AgentLoop
 from kama_claude.core.runs import RUNS_DIR, new_run_id
+from kama_claude.core.session.model import Session
+from kama_claude.core.session.store import SessionStore
 from kama_claude.core.task.manager import TaskManager
 from kama_claude.core.tools.builtin import (
     BashTool,
     ListDirTool,
+    NoteSaveTool,
     ReadFileTool,
     TaskCreateTool,
     TaskGetTool,
@@ -83,9 +86,16 @@ class AgentRunner:
         self._trace = trace
 
     # 构建工具注册表，注入 TaskManager（任务工具共享同一实例）
-    def _build_registry(self, task_manager: TaskManager) -> ToolRegistry:
-        # 四种执行工具 + 四种待办工具；注册是保存对象，不会立即调用工具。
-        # 四个任务工具引用同一 Manager，所以 create 的结果立刻能被 get/list/update 读取。
+    def _build_registry(
+        self,
+        task_manager: TaskManager,
+        *,
+        session: Session | None = None,
+        store: SessionStore | None = None,
+        run_id: str | None = None,
+    ) -> ToolRegistry:
+        # 四种执行工具和四种待办工具始终注册；会话路径额外注册 note_save，共九种。
+        # 四个 task 工具共享本轮 Manager；注册只保存对象，不会执行工具。
         registry = ToolRegistry()
         registry.register(ReadFileTool())
         registry.register(BashTool())
@@ -95,6 +105,8 @@ class AgentRunner:
         registry.register(TaskUpdateTool(task_manager))
         registry.register(TaskListTool(task_manager))
         registry.register(TaskGetTool(task_manager))
+        if session is not None and store is not None and run_id is not None:
+            registry.register(NoteSaveTool(store, session.id, run_id))
         return registry
 
     # 执行一次完整的 agent run（委托给 run_and_capture，忽略返回值）
@@ -103,12 +115,24 @@ class AgentRunner:
 
     # 执行 agent run 并返回 RunOutcome（含最终文字结果）
     async def run_and_capture(
-        self, goal: str, *, run_id: str | None = None
+        self,
+        goal: str,
+        *,
+        run_id: str | None = None,
+        session: Session | None = None,
+        store: SessionStore | None = None,
     ) -> RunOutcome:
         # 步骤 1：确定 run 目录和该 run 独有的任务 Manager；目录名将 run 与 task ID 隔开。
         run_id = run_id or new_run_id()
-        run_path = self._runs_dir / run_id
-        # Path 的 / 拼接目录；parents=True 补齐父目录，exist_ok=True 接受已有目录。
+        if session is not None and store is not None:
+            # Manager 已追加本轮 user；读完整历史和笔记，不能再次插入 goal。
+            run_path = store.runs_dir(session.id) / run_id
+            history = store.read_messages(session.id)
+            notes = store.read_notes(session.id)
+        else:
+            run_path = self._runs_dir / run_id
+            history = [{"role": "user", "content": goal}]
+            notes = ""
         run_path.mkdir(parents=True, exist_ok=True)
 
         task_manager = TaskManager(run_path / ".tasks")
@@ -126,7 +150,11 @@ class AgentRunner:
             run_id=run_id,
             goal=goal,
             max_steps=self._config.agent.max_steps,
+            prefill_messages=history,
+            session_notes=notes,
         )
+        prefill_len = len(history)
+        # 保存前缀长度，结束后只把本轮新增的 assistant/tool_result 追加回 thread。
 
         # 步骤 4：打开事件文件，登记订阅并发布开始事件。
         # async with 管理事件文件；IPC 广播器和文件 writer 订阅同一进程内总线。
@@ -135,30 +163,37 @@ class AgentRunner:
             writer.subscribe(bus)
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
 
-            # 步骤 5：选择模型，按需包装 trace，并注册全部八种工具。
-            # LLMProvider 是接口约定；测试注入假实现可真正运行 Loop/工具而不请求模型。
-            provider: LLMProvider = self._provider or AnthropicProvider(
-                self._config.llm.default_model
+            # 步骤 5：把会话信息绑定到 note_save；无会话的直接调用仍保留八工具。
+            registry = self._build_registry(
+                task_manager,
+                session=session,
+                store=store,
+                run_id=run_id,
             )
-            if self._trace is not None:
-                provider = TracingProvider(
-                    provider,
-                    self._trace,
-                    include_payload=self._config.trace.include_llm_payload,
-                )
-            registry = self._build_registry(task_manager)
-            loop = AgentLoop(provider, registry, bus)
 
             # 步骤 6：执行循环并记录取消状态。
             # 暂存取消状态，写完结束事件并关闭文件后再向调用方抛出取消异常。
             cancelled = False
             try:
+                provider: LLMProvider = self._provider or AnthropicProvider(
+                    self._config.llm.default_model
+                )
+                if self._trace is not None:
+                    provider = TracingProvider(
+                        provider,
+                        self._trace,
+                        include_payload=self._config.trace.include_llm_payload,
+                    )
+                loop = AgentLoop(provider, registry, bus)
                 await loop.run(context)
             # 先记录取消状态并发布 run.finished，再向上重新抛出取消异常。
             except asyncio.CancelledError:
                 cancelled = True
                 if not context.is_done():
                     context.mark_failed("cancelled")
+            except Exception:
+                if not context.is_done():
+                    context.mark_failed("llm_error")
 
             # 步骤 7：发布任务结束事件，离开上下文关闭文件。
             await bus.publish(
@@ -172,12 +207,16 @@ class AgentRunner:
                 )
             )
 
-        # 步骤 8：把取消异常继续交给上层。
+        if session is not None and store is not None:
+            # 步骤 8：事件文件先关闭，再保存本轮模型消息；两种文件的内容不同。
+            store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
+
+        # 步骤 9：把取消异常继续交给上层。
         # 保留取消语义，不能把取消悄悄当作正常返回。
         if cancelled:
             raise asyncio.CancelledError()
 
-        # 步骤 9：非取消路径返回结果；run() 会忽略它，run_and_capture() 的调用者可以读取。
+        # 步骤 10：非取消路径返回结果；run() 忽略它，SessionManager 当前也不检查其 status。
         return RunOutcome(
             status=context.status,
             result=context.result,

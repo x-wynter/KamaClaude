@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -77,8 +78,9 @@ async def test_shutdown_cancel_restores_handlers(monkeypatch: pytest.MonkeyPatch
 # 功能：S3 正常退出或等待异常时，都取消全部 run，等收尾后再停服务器和 trace。
 # 设计：运行真实 CoreApp 生命周期，仅替换外部资源与长任务，检查清理顺序及集合移除。
 @pytest.mark.parametrize("wait_fails", [False, True])
+@pytest.mark.parametrize("chat", [False, True])
 async def test_s3_shutdown_cleans_all_runs(
-    monkeypatch: pytest.MonkeyPatch, wait_fails: bool,
+    monkeypatch: pytest.MonkeyPatch, wait_fails: bool, tmp_path: Path, chat: bool,
 ) -> None:
     from unittest.mock import AsyncMock
 
@@ -95,7 +97,7 @@ async def test_s3_shutdown_cleans_all_runs(
             pass
 
         # 等两个 run 都启动；取消时模拟 Runner 的结束事件/文件收尾。
-        async def run(self, goal: str, *, run_id: str) -> None:
+        async def run_and_capture(self, goal: str, **kwargs: object) -> None:
             nonlocal started
             started += 1
             if started == 2:
@@ -116,12 +118,21 @@ async def test_s3_shutdown_cleans_all_runs(
     monkeypatch.setattr(app_module, "SocketServer", Mock(return_value=server))
     monkeypatch.setattr(app_module, "TraceWriter", Mock(return_value=trace))
     monkeypatch.setattr(app_module, "AgentRunner", WaitingRunner)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
     application = app_module.CoreApp()
+    requests: list[asyncio.Task[object]] = []
 
     # 在服务接线后提交两个 run；模拟通知返回或等待阶段抛异常。
     async def wait_for_exit() -> None:
         await application._agent_run_handler({"goal": "first"})
-        await application._agent_run_handler({"goal": "second"})
+        if chat:
+            created = await application._session_create_handler({"mode": "chat"})
+            requests.append(asyncio.create_task(application._session_send_handler({
+                "session_id": created.session_id, "content": "second",
+            })))
+        else:
+            await application._agent_run_handler({"goal": "second"})
         await asyncio.wait_for(both_started.wait(), timeout=1)
         assert len(application._running_runs) == 2
         if wait_fails:
@@ -133,6 +144,7 @@ async def test_s3_shutdown_cleans_all_runs(
             await application.run()
     else:
         await application.run()
+    await asyncio.gather(*requests, return_exceptions=True)
     assert set(order[:2]) == {"first", "second"}
     assert order[2:] == ["server", "trace"]
     assert not application._running_runs

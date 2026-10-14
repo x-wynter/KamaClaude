@@ -59,7 +59,7 @@ class LlmConfig:
     # 字段：传给模型 Provider 的模型名称。
     default_model: str = _DEFAULT_MODEL
     # 字段：保存路由策略名称；当前 Provider 固定使用静态模型。
-    router: str = "static"  # "static" | "rule_based" (S4) | "cost_budget" (S6)
+    router: str = "static"  # S4 仍未实现动态路由；其他字符串只是配置值。
 
 
 # ── 类：TraceConfig ──

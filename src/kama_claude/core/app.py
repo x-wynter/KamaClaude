@@ -1,6 +1,6 @@
 # ═══ 文件职责：核心服务的组装与生命周期 ═══
 # 协作关系：CLI/TUI → SocketServer → CoreApp → AgentRunner；事件通过共享总线回到客户端。
-# 阅读路线：先读 CoreApp.run，再读三个 handler，最后读历史回放和退出信号。
+# 阅读路线：先读 run 接线，再读 agent.run/session.* handler，最后看回放和退出信号。
 # 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
 
 # ── 依赖导入 ──
@@ -28,6 +28,14 @@ from kama_claude.core.bus.commands import (
     EventSubscribeCommand,
     EventSubscribeResult,
     PongResult,
+    SessionCloseCommand,
+    SessionCloseResult,
+    SessionCreateCommand,
+    SessionCreateResult,
+    SessionGetHistoryCommand,
+    SessionGetHistoryResult,
+    SessionSendMessageCommand,
+    SessionSendMessageResult,
 )
 from kama_claude.core.bus.envelope import EventPushEnvelope
 from kama_claude.core.config import KamaConfig, get_config
@@ -35,6 +43,7 @@ from kama_claude.core.events.bus import EventBus
 from kama_claude.core.logging_setup import setup_logging
 from kama_claude.core.runner import AgentRunner
 from kama_claude.core.runs import events_file, new_run_id
+from kama_claude.core.session import SessionManager, SessionStore
 from kama_claude.core.trace.record import TraceRecord
 from kama_claude.core.trace.writer import TraceWriter
 from kama_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
@@ -108,7 +117,9 @@ class CoreApp:
         self._broadcaster: IpcEventBroadcaster | None = None
         self._trace: TraceWriter | None = None
         self._config: KamaConfig | None = None
-        self._running_runs: set[asyncio.Task[None]] = set()
+        self._running_runs: set[asyncio.Task[Any]] = set()
+        self._sessions: SessionManager | None = None
+        # run 启动时创建；保存会话索引/锁，与 _running_runs 的协程回收职责不同。
 
     # ── 函数：_ping_handler ──
     # 用途：处理 core.ping 请求，返回服务版本、运行时长和接收时间
@@ -143,23 +154,52 @@ class CoreApp:
 
     # 启动一次 agent run：异步创建 AgentRunner 并立即返回 run_id
     async def _agent_run_handler(self, params: dict[str, Any]) -> AgentRunResult:
-        # 步骤 1：校验配置与请求；S3 移除了 S2 的单 run 限制。
-        # run 已加载配置才会接收命令；assert 同时帮助类型检查器排除 None。
-        assert self._config is not None
-        # 库函数：Pydantic 的 model_validate 校验字典并创建模型；失败时抛出 ValidationError。
+        # 步骤 1：兼容旧入口，但 S4 内部先创建 one_shot 会话。
+        assert self._sessions is not None
         cmd = AgentRunCommand.model_validate(params)
-        # 步骤 2：为本次 run 分配 ID 和 Runner，共享 bus/trace，但不共享 Context/Manager。
+        session = await self._sessions.create(mode="one_shot", title=cmd.goal[:40])
         run_id = new_run_id()
-        runner = AgentRunner(self._config, bus=self._bus, trace=self._trace)
-        # 步骤 3：标准库 create_task 安排后台协程，立刻返回 ID，不等待模型结束。
-        # add_done_callback 在结束时调用 set.discard；保存强引用也便于退出时取消所有 run。
-        run_task = asyncio.create_task(runner.run(cmd.goal, run_id=run_id))
+        run_task = asyncio.create_task(
+            self._sessions.send_message(session.id, cmd.goal, run_id=run_id)
+        )
         self._running_runs.add(run_task)
         run_task.add_done_callback(self._running_runs.discard)
         return AgentRunResult(run_id=run_id)
 
-    # ── 函数：_subscribe_handler ──
-    # 用途：注册客户端事件订阅，可选先回放 events.jsonl 历史再接收实时流
+    # 创建 chat 或 one_shot session，并返回 session_id
+    async def _session_create_handler(self, params: dict[str, Any]) -> SessionCreateResult:
+        assert self._sessions is not None
+        cmd = SessionCreateCommand.model_validate(params)
+        session = await self._sessions.create(mode=cmd.mode, title=cmd.title)
+        return SessionCreateResult(session_id=session.id, status=session.status)
+
+    # 向 session 发送一条用户消息并同步等待对应 run 完成
+    async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
+        assert self._sessions is not None
+        cmd = SessionSendMessageCommand.model_validate(params)
+        # S4 的 chat 也纳入退出回收；await 保持 RPC 等待本轮完成的官方语义。
+        run_task = asyncio.create_task(self._sessions.send_message(cmd.session_id, cmd.content))
+        self._running_runs.add(run_task)
+        # 步骤 2：保存强引用；完成回调移除它。这里返回时模型可能尚未开始。
+        run_task.add_done_callback(self._running_runs.discard)
+        run_id = await run_task
+        return SessionSendMessageResult(run_id=run_id)
+
+    # 返回 session 的完整 Anthropic messages 历史
+    async def _session_history_handler(self, params: dict[str, Any]) -> SessionGetHistoryResult:
+        assert self._sessions is not None
+        cmd = SessionGetHistoryCommand.model_validate(params)
+        messages = await self._sessions.get_history(cmd.session_id)
+        return SessionGetHistoryResult(messages=messages)
+
+    # 关闭 session 并返回 closed 状态
+    async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
+        assert self._sessions is not None
+        cmd = SessionCloseCommand.model_validate(params)
+        await self._sessions.close(cmd.session_id)
+        return SessionCloseResult(status="closed")
+
+    # 注册客户端事件订阅，可选先回放 events.jsonl 历史再接收实时流
     async def _subscribe_handler(self, params: dict[str, Any]) -> EventSubscribeResult:
         # 步骤 1：校验订阅参数，取得当前客户端连接。
         cmd = EventSubscribeCommand.model_validate(params)
@@ -189,6 +229,12 @@ class CoreApp:
     ) -> int:
         # 步骤 1：定位历史文件；不存在就返回零条。
         path = events_file(run_id)
+        if not path.exists():
+            for candidate in Path("~/.kama/sessions").expanduser().glob(
+                f"*/runs/{run_id}/events.jsonl"
+            ):
+                path = candidate
+                break
         if not path.exists():
             return 0
 
@@ -224,7 +270,7 @@ class CoreApp:
         self._config = get_config()
         setup_logging(self._config)
 
-        # 步骤 2：先启动 trace，再接线事件采集和广播器，最后注册三个 RPC 入口。
+        # 步骤 2：先启动 trace，再接线广播器/会话工厂，最后注册七个 RPC 入口。
         # Path.expanduser 将 ~ 展开到用户目录；trace=None 表示禁用所有这些采集点。
         if self._config.trace.enabled:
             trace_path = Path(self._config.trace.file).expanduser()
@@ -234,6 +280,14 @@ class CoreApp:
 
         self._broadcaster = IpcEventBroadcaster(trace=self._trace)
         self._bus.subscribe(self._broadcaster.handle)
+        sessions_root = Path("~/.kama/sessions").expanduser()
+        store = SessionStore(sessions_root)
+        self._sessions = SessionManager(
+            # lambda 是延迟调用的工厂；每条消息运行时才创建独立 Runner。
+            store,
+            runner_factory=lambda: AgentRunner(self._config, bus=self._bus, trace=self._trace),  # type: ignore[arg-type]
+            bus=self._bus,
+        )
 
         server = SocketServer(
             self._config.host,
@@ -244,6 +298,10 @@ class CoreApp:
         server.register("core.ping", self._ping_handler)
         server.register("agent.run", self._agent_run_handler)
         server.register("event.subscribe", self._subscribe_handler)
+        server.register("session.create", self._session_create_handler)
+        server.register("session.send_message", self._session_send_handler)
+        server.register("session.get_history", self._session_history_handler)
+        server.register("session.close", self._session_close_handler)
 
         # 步骤 3：启动监听并记录服务信息。
         # await 等待监听启动完成；已有连接的处理由事件循环继续调度。
