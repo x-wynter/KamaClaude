@@ -1,6 +1,6 @@
 # ═══ 文件职责：配置定义与分层加载 ═══
 # 协作关系：Core、CLI、TUI 各自调用 get_config，得到自己的配置对象。
-# 阅读路线：先看五个 dataclass，再读 get_config；最后展开 TOML 和环境变量覆盖规则。
+# 阅读路线：先看六个 dataclass，再读 get_config；最后展开 TOML 和环境变量覆盖规则。
 # 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
 
 # ── 依赖导入 ──
@@ -72,9 +72,15 @@ class TraceConfig:
     include_llm_payload: bool = True  # false 时 LLM 记录只保留摘要
 
 
-# ── 类：KamaConfig ──
-# 职责：汇总地址、日志、Agent、模型和 trace；不同启动进程各自加载一份。
+# ── 类：PermissionConfig ──
+# PermissionConfig 保存 Core 的审批等待上限；0 表示无限等待。
 @dataclass
+class PermissionConfig:
+    timeout_s: float = 60.0  # 审批超时秒数；0 表示不超时
+
+
+@dataclass
+# 汇总全部配置，每个进程各自加载；default_factory 独立创建各小节对象。
 class KamaConfig:
     # 字段：Core 监听或客户端连接的主机地址。
     host: str = _DEFAULT_HOST
@@ -87,6 +93,7 @@ class KamaConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
     trace: TraceConfig = field(default_factory=TraceConfig)
+    permission: PermissionConfig = field(default_factory=PermissionConfig)
 
 
 # ── 函数：get_config ──
@@ -129,8 +136,8 @@ def get_config() -> KamaConfig:
 # ── 函数：_apply_toml ──
 # 用途：将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
 def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
-    # 步骤 1：集合差集找出未知配置章节；S3 允许新增 [trace]。
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace"}
+    # 步骤1：校验顶层章节，S5 额外允许 permission。
+    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission"}
     if unknown:
         # sorted 排序得到列表，join 用逗号拼接，保证错误信息顺序稳定。
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
@@ -233,6 +240,19 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
                 raise SystemExit("Config error: trace.include_llm_payload must be a boolean")
             config.trace.include_llm_payload = val
 
+    if "permission" in data:
+        perm = data["permission"]
+        if not isinstance(perm, dict):
+            raise SystemExit("Config error: [permission] must be a table")
+        unknown_perm: set[str] = set(perm.keys()) - {"timeout_s"}
+        if unknown_perm:
+            raise SystemExit(f"Unknown [permission] keys: {', '.join(sorted(unknown_perm))}")
+        if "timeout_s" in perm:
+            val = perm["timeout_s"]
+            if not isinstance(val, (int, float)) or val < 0:
+                raise SystemExit("Config error: permission.timeout_s must be a non-negative number")
+            config.permission.timeout_s = float(val)
+
 
 # ── 函数：_apply_env ──
 # 用途：用 KAMA_* 环境变量覆盖 config 中对应字段（若变量已设置）
@@ -299,3 +319,17 @@ def _apply_env(config: KamaConfig) -> None:
     trace_payload = os.environ.get("KAMA_TRACE_INCLUDE_LLM_PAYLOAD")
     if trace_payload is not None:
         config.trace.include_llm_payload = trace_payload.lower() not in ("0", "false", "no")
+
+    perm_timeout = os.environ.get("KAMA_PERMISSION_TIMEOUT_S")
+    if perm_timeout is not None:
+        try:
+            permission_seconds = float(perm_timeout)
+            if permission_seconds < 0:
+                raise SystemExit(
+                    f"Config error: KAMA_PERMISSION_TIMEOUT_S must be >= 0, got: {perm_timeout!r}"
+                )
+            config.permission.timeout_s = permission_seconds
+        except ValueError:
+            raise SystemExit(
+                f"Config error: KAMA_PERMISSION_TIMEOUT_S must be a number, got: {perm_timeout!r}"
+            )

@@ -3,12 +3,21 @@
 # 阅读顺序：schema → 绑定字段 → invoke；这不是跨会话检索或自动摘要系统。
 from __future__ import annotations
 
+from pydantic import BaseModel, ConfigDict
+
 from kama_claude.core.session.store import SessionStore
 from kama_claude.core.tools.base import BaseTool, ToolResult
 
 
+# 参数模型供公共调用器提前校验，也供 invoke 解析；schema 仍单独提供给模型。
+class NoteSaveParams(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    content: str
+
+
 class NoteSaveTool(BaseTool):
     # 类字段给模型描述调用方式；模型只提交 JSON 参数，不执行这个 Python 类。
+    params_model = NoteSaveParams
     name = "note_save"
     description = (
         "Save a concise fact or decision to this session's notes. "
@@ -34,8 +43,7 @@ class NoteSaveTool(BaseTool):
 
     # 将非空 content 追加到 session notes.md
     async def invoke(self, params: dict[str, object]) -> ToolResult:
-        # 步骤 1：取参数并拒绝空白；str 是内置转换，strip 去掉首尾空白。
-        content = str(params.get("content", "")).strip()
+        content = NoteSaveParams.model_validate(params).content.strip()
         if not content:
             return ToolResult(
                 content="empty content",

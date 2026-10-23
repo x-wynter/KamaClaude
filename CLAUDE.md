@@ -122,3 +122,15 @@ Windows signal/PID/startup fixes and legacy trace decoding remain applicable.
 Core shutdown cancels and awaits both one_shot and chat runs before trace shutdown.
 Tests use tests/offline_daemon.py with a fake model and temporary HOME/cwd.
 Do not collect test_run_e2e.py for offline validation or load project .env secrets.
+
+## S5 learning branch
+
+See doc/STUDY_GUIDE_S5.md and doc/S5_VALIDATION.md for current behavior.
+Core shares PermissionManager across runs and registers permission.respond.
+SocketServer dispatches each request as a tracked task so approvals can arrive
+while session.send_message is waiting. TUI uses a send worker and keyboard
+PermissionSelect. CLI chat still cannot read an approval while its send RPC waits.
+Permission waits clean up on cancellation/emitter errors; disconnect rejects
+existing pending approvals for sessions recorded on that connection, without
+cancelling the whole run. Shell cancellation reaps the direct child process.
+Offline tests isolate HOME/USERPROFILE and inherited KAMA/ANTHROPIC environment.

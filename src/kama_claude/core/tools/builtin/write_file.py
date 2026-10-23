@@ -7,14 +7,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import BaseModel, ConfigDict
+
 from kama_claude.core.tools.base import BaseTool, ToolResult
 
 _MAX_BYTES = 1 * 1024 * 1024  # 1 MB
 
 
-# ── 类：WriteFileTool ──
-# 类字段提供工具契约；磁盘修改发生在 invoke，返回 ToolResult 供 Loop 加入历史。
+# 参数模型供公共调用器提前校验，也供 invoke 解析；schema 仍单独提供给模型。
+class WriteFileParams(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    path: str
+    content: str
+
+
 class WriteFileTool(BaseTool):
+    params_model = WriteFileParams
     name = "write_file"
     description = (
         "Write text content to a file, creating it (and any parent directories) if it "
@@ -39,9 +47,9 @@ class WriteFileTool(BaseTool):
 
     # 写入文件内容；超 1MB 拒绝；禁止 .. 路径遍历；自动创建父目录
     async def invoke(self, params: dict[str, object]) -> ToolResult:
-        # 步骤 1：将参数转为字符串；Path.parts 按路径组件检查 ..，不是检查子字符串。
-        path_str = str(params["path"])
-        content = str(params["content"])
+        p = WriteFileParams.model_validate(params)
+        path_str = p.path
+        content = p.content
 
         if ".." in Path(path_str).parts:
             raise PermissionError(f"path traversal not allowed: {path_str}")

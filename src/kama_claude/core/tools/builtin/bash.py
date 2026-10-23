@@ -1,11 +1,13 @@
 # ═══ 文件职责：执行非交互 shell 命令 ═══
 # 协作关系：Runner 注册 → invoke_tool 提供外层超时和事件 → 本工具执行子进程。
 # 阅读路线：先看输入 schema，再读 invoke 的启动、超时、解码与退出码分支。
-# 当前没有命令审批、沙箱或完整进程树回收；不能将工具描述当作这些保障。
+# 审批由外层调用器完成；本类本身没有沙箱，也不保证完整进程树回收。
 
 from __future__ import annotations
 
 import asyncio
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from kama_claude.core.tools.base import BaseTool, ToolResult
 
@@ -13,9 +15,15 @@ _MAX_OUTPUT_BYTES = 64 * 1024  # 64 KB
 _DEFAULT_TIMEOUT = 60
 
 
-# ── 类：BashTool ──
-# 类字段 name/description/input_schema 供注册表生成模型工具说明；实例无持久状态。
+# BaseModel 校验类型；Field 的 ge/le 限制秒数范围，extra=ignore 忽略多余字段。
+class BashParams(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    command: str
+    timeout: int = Field(default=_DEFAULT_TIMEOUT, ge=1, le=120)
+
+
 class BashTool(BaseTool):
+    params_model = BashParams
     name = "bash"
     description = (
         "Execute a shell command and return its output (stdout + stderr combined). "
@@ -39,10 +47,10 @@ class BashTool(BaseTool):
 
     # 在子进程中执行 shell 命令，合并 stdout/stderr，超时或非零退出码时返回错误
     async def invoke(self, params: dict[str, object]) -> ToolResult:
-        # 步骤 1：提取命令和秒数，min 是内置函数，将超时上限限制为 120。
-        # 工具名叫 bash，但未指定 executable：Windows 通常使用 cmd.exe，POSIX 使用 /bin/sh。
-        command = str(params["command"])
-        timeout = min(int(str(params.get("timeout") or _DEFAULT_TIMEOUT)), 120)
+        # 步骤1：解析参数；未指定 executable，Windows 通常使用 cmd.exe，不是 Git Bash。
+        p = BashParams.model_validate(params)
+        command = p.command
+        timeout = p.timeout
 
         # 步骤 2：标准库 asyncio 启动 shell 子进程；PIPE 捕获输出，STDOUT 合并错误流。
         try:
@@ -57,6 +65,12 @@ class BashTool(BaseTool):
                 stdout_bytes, _ = await asyncio.wait_for(
                     proc.communicate(), timeout=timeout
                 )
+            # 外层工具超时和 Core 退出也会取消本协程，先回收直接子进程再传播取消。
+            except asyncio.CancelledError:
+                if proc.returncode is None:
+                    proc.kill()
+                await proc.communicate()
+                raise
             except TimeoutError:
                 proc.kill()
                 await proc.communicate()

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from kama_claude.core.events.writer import EventWriter
 from kama_claude.core.llm.base import LLMProvider
 from kama_claude.core.llm.provider import AnthropicProvider
 from kama_claude.core.loop import AgentLoop
+from kama_claude.core.permissions.manager import PermissionManager
 from kama_claude.core.runs import RUNS_DIR, new_run_id
 from kama_claude.core.session.model import Session
 from kama_claude.core.session.store import SessionStore
@@ -73,6 +75,7 @@ class AgentRunner:
         extra_handlers: list[EventHandler] | None = None,
         runs_dir: Path | None = None,
         trace: TraceWriter | None = None,
+        permission_manager: PermissionManager | None = None,
     ) -> None:
         # 这里只保存依赖，不启动模型请求；真正执行入口是下面的 run。
         # self._config 的下划线表示内部属性约定，不是 Python 强制私有。
@@ -84,6 +87,8 @@ class AgentRunner:
         self._extra_handlers: list[EventHandler] = extra_handlers or []
         self._runs_dir = runs_dir or RUNS_DIR
         self._trace = trace
+        # Core 创建的共享权限管理器；直接 Python 调用可不传，不由 Runner 每轮重建。
+        self._permission_manager = permission_manager
 
     # 构建工具注册表，注入 TaskManager（任务工具共享同一实例）
     def _build_registry(
@@ -184,7 +189,11 @@ class AgentRunner:
                         self._trace,
                         include_payload=self._config.trace.include_llm_payload,
                     )
-                loop = AgentLoop(provider, registry, bus)
+                loop = AgentLoop(
+                    provider, registry, bus,
+                    permission_manager=self._permission_manager,
+                    session_id=session.id if session is not None else "",
+                )
                 await loop.run(context)
             # 先记录取消状态并发布 run.finished，再向上重新抛出取消异常。
             except asyncio.CancelledError:
@@ -192,6 +201,9 @@ class AgentRunner:
                 if not context.is_done():
                     context.mark_failed("cancelled")
             except Exception:
+                logging.getLogger(__name__).exception(
+                    "agent run failed run_id=%s step=%d", run_id, context.step
+                )
                 if not context.is_done():
                     context.mark_failed("llm_error")
 

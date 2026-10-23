@@ -70,6 +70,7 @@ class SocketServer:
         port: int,
         broadcaster: IpcEventBroadcaster | None = None,
         trace: TraceWriter | None = None,
+        on_disconnect: Callable[[asyncio.StreamWriter], None] | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -79,6 +80,8 @@ class SocketServer:
         self._server: asyncio.AbstractServer | None = None
         self._broadcaster = broadcaster
         self._trace = trace
+        self._on_disconnect = on_disconnect
+        self._requests: set[asyncio.Task[None]] = set()
 
     # ── 函数：register ──
     # 用途：注册一个方法名对应的命令处理函数
@@ -120,6 +123,11 @@ class SocketServer:
         if self._server is None:
             return
         # 停止监听，不再接受新连接；这里没有维护和逐个关闭已有客户端的连接列表。
+        pending = list(self._requests)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         self._server.close()
         # wait_for 限制等待关闭的时长；超过 2 秒会抛出 TimeoutError。
         await asyncio.wait_for(self._server.wait_closed(), timeout=2.0)
@@ -143,17 +151,19 @@ class SocketServer:
         # 步骤 3：移除订阅并关闭此客户端写流。
         # 即使读取或处理请求时出错，也进入 finally，尝试关闭当前客户端写流。
         finally:
+            if self._on_disconnect is not None:
+                self._on_disconnect(writer)
             if self._broadcaster is not None:
                 self._broadcaster.unsubscribe(writer)
             writer.close()
             try:
                 await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
-            except TimeoutError:
+            except (TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
                 pass
             logger.debug("client disconnected: %s", peer)
 
     # ── 函数：_read_loop ──
-    # 用途：持续读取换行分隔的 JSON 行并逐行分发处理
+    # 用途：持续读取 JSON 行，各请求独立调度，允许审批与长请求交替推进
     async def _read_loop(
         self,
         reader: asyncio.StreamReader,
@@ -174,7 +184,18 @@ class SocketServer:
             if not line:
                 return
 
-            await self._handle_line(line, writer)
+            # 每条命令独立作为 task 执行，避免长时间运行的 handler（如 session.send_message）
+            # 阻塞读循环，使 permission.respond 等并发命令能被及时处理
+            # create_task 立即返回任务引用；ContextVar 在子任务中隔离当前连接。
+            task = asyncio.create_task(self._handle_line(line, writer))
+            self._requests.add(task)
+            task.add_done_callback(self._request_done)
+
+    # 回收请求任务并读取异常，防止后台异常无人接收。
+    def _request_done(self, task: asyncio.Task[None]) -> None:
+        self._requests.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("request task failed: %s", task.exception())
 
     # ── 函数：_handle_line ──
     # 用途：解析单行 JSON-RPC 请求并调用对应 handler，将结果或错误写回客户端
@@ -247,8 +268,10 @@ class SocketServer:
         # 条件表达式：是 Pydantic 模型就转为字典，否则保留原值。
         # model_dump 返回 Python 数据，model_dump_json 才返回 JSON 字符串。
         result_data: Any = result.model_dump() if isinstance(result, BaseModel) else result
-        # 把业务结果放入协议外壳，沿用请求 id，让客户端对应请求与响应。
-        await self._send(writer, JsonRpcSuccess(id=req.id, result=result_data))
+        try:
+            await self._send(writer, JsonRpcSuccess(id=req.id, result=result_data))
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            logger.debug("client disconnected before response for %s", req.method)
 
     # ── 函数：_send ──
     # 用途：将 pydantic 消息序列化为 JSON 行并写入流，随后刷新缓冲区

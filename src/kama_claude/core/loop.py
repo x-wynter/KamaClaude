@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from kama_claude.core.bus.events import StepFinishedEvent, StepStartedEvent
 from kama_claude.core.context import ExecutionContext
@@ -15,6 +16,9 @@ from kama_claude.core.events.bus import EventBus
 from kama_claude.core.llm.base import LLMProvider
 from kama_claude.core.tools.invocation import invoke_tool
 from kama_claude.core.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from kama_claude.core.permissions.manager import PermissionManager
 
 
 # ── 函数：_now ──
@@ -24,22 +28,26 @@ def _now() -> str:
 
 
 # ── 类：AgentLoop ──
-# 职责：反复请求模型、执行工具、更新上下文，直到任务终止。
+# 职责：反复请求模型、执行工具、更新上下文，直到本轮运行终止。
 # 字段说明：
 #   _provider：请求模型；_registry：查找工具和生成工具说明；_bus：发布进度。
 class AgentLoop:
-    # ── 初始化：__init__ ──
-    # 用途：初始化循环所需的三个依赖：LLM provider、工具注册表、事件总线
+    # 初始化循环所需依赖：LLM provider、工具注册表、事件总线，以及可选的权限管理器和 session ID
     def __init__(
         self,
         provider: LLMProvider,
         registry: ToolRegistry,
         bus: EventBus,
+        *,
+        permission_manager: PermissionManager | None = None,
+        session_id: str = "",
     ) -> None:
-        # 保存三个协作对象的引用，既不复制它们，也不在构造时执行任务。
+        # 保存协作对象的引用，既不复制它们，也不在构造时执行任务。
         self._provider = provider
         self._registry = registry
         self._bus = bus
+        self._permission_manager = permission_manager
+        self._session_id = session_id
 
     # ── 函数：run ──
     # 用途：驱动 plan→act→observe 循环直到上下文终止；CancelledError 向上传播
@@ -101,7 +109,9 @@ class AgentLoop:
                 # 每次 await 完成后才处理下一个工具；此处没有 create_task 或 gather 并发。
                 for tc in response.tool_calls:
                     result = await invoke_tool(
-                        self._registry, tc, self._bus, context.run_id
+                        self._registry, tc, self._bus, context.run_id,
+                        permission_manager=self._permission_manager,
+                        session_id=self._session_id,
                     )
                     # 工具失败也写入历史，模型下一步能看到错误并尝试调整。
                     context.add_tool_result(tc.id, result.content, is_error=result.is_error)

@@ -111,12 +111,12 @@ class ToolCallFailedEvent(BaseModel):
     tool_use_id: str
     # 字段：工具注册名称，例如 read_file。
     tool_name: str
-    # 字段：错误类别，供程序分类处理。
-    error_type: str  # "runtime_error" | "timeout" | "schema_error"
-    # 字段：具体失败原因，供日志和界面展示。
+    # "runtime_error" | "timeout" | "schema_error" | "permission_denied" | "rate_limited"
+    error_class: str
     error_message: str
     # 字段：本次工具调用的耗时，单位毫秒。
     elapsed_ms: int
+    attempt: int = 1  # 1=first attempt, 2=first retry, 3=second retry
     ts: str
 
 
@@ -212,6 +212,38 @@ class SessionClosedEvent(BaseModel):
     ts: str
 
 
+# 调用器在等待前发布；参数供客户端展示，session/run/id 用于追踪同一调用。
+class PermissionRequestedEvent(BaseModel):
+    type: Literal["permission.requested"] = "permission.requested"
+    run_id: str
+    tool_use_id: str
+    tool_name: str
+    params: dict[str, Any]
+    param_preview: str
+    session_id: str
+    ts: str
+
+
+# 交互允许后发布；auto_allow 的快捷路径不会额外发布此事件。
+class PermissionGrantedEvent(BaseModel):
+    type: Literal["permission.granted"] = "permission.granted"
+    run_id: str
+    tool_use_id: str
+    # "allow_once" | "always_allow" | "auto_allow"
+    decision: str
+    ts: str
+
+
+# 交互拒绝或超时后发布；静态 auto_deny 只产生工具失败事件。
+class PermissionDeniedEvent(BaseModel):
+    type: Literal["permission.denied"] = "permission.denied"
+    run_id: str
+    tool_use_id: str
+    # "deny_once" | "always_deny" | "auto_deny"
+    decision: str
+    ts: str
+
+
 # 根据 type 字段决定事件类型的判别联合
 # Annotated 附加按 type 判别的元数据；S1 已有多种事件，解析时按 type 选择具体模型。
 # A | B 表示可以是 A 或 B；Annotated 在类型之外附加 Pydantic 的判别规则。
@@ -233,6 +265,9 @@ Event = Annotated[
     | SessionMessageReceivedEvent
     | SessionWaitingForInputEvent
     | SessionResumedEvent
-    | SessionClosedEvent,
+    | SessionClosedEvent
+    | PermissionRequestedEvent
+    | PermissionGrantedEvent
+    | PermissionDeniedEvent,
     Discriminator("type"),
 ]

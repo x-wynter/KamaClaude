@@ -9,7 +9,7 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 
 import pytest
@@ -94,3 +94,19 @@ async def running_daemon(free_port: int, tmp_path: Path) -> AsyncGenerator[subpr
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+
+
+@pytest.fixture(autouse=True)
+# 隔离默认用户目录与继承的服务配置，并还原 dotenv 在测试中补入的环境变量。
+def isolated_user_environment(tmp_path: Path) -> Iterator[None]:
+    original = dict(os.environ)
+    for key in list(os.environ):
+        if key.startswith(("KAMA_", "ANTHROPIC_")):
+            os.environ.pop(key)
+    os.environ["HOME"] = str(tmp_path)
+    os.environ["USERPROFILE"] = str(tmp_path)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(original)

@@ -27,6 +27,8 @@ from kama_claude.core.bus.commands import (
     AgentRunResult,
     EventSubscribeCommand,
     EventSubscribeResult,
+    PermissionRespondCommand,
+    PermissionRespondResult,
     PongResult,
     SessionCloseCommand,
     SessionCloseResult,
@@ -41,6 +43,8 @@ from kama_claude.core.bus.envelope import EventPushEnvelope
 from kama_claude.core.config import KamaConfig, get_config
 from kama_claude.core.events.bus import EventBus
 from kama_claude.core.logging_setup import setup_logging
+from kama_claude.core.permissions.manager import PermissionManager
+from kama_claude.core.permissions.storage import load_policy_file
 from kama_claude.core.runner import AgentRunner
 from kama_claude.core.runs import events_file, new_run_id
 from kama_claude.core.session import SessionManager, SessionStore
@@ -118,8 +122,24 @@ class CoreApp:
         self._trace: TraceWriter | None = None
         self._config: KamaConfig | None = None
         self._running_runs: set[asyncio.Task[Any]] = set()
+        self._connection_sessions: dict[asyncio.StreamWriter, set[str]] = {}
         self._sessions: SessionManager | None = None
-        # run 启动时创建；保存会话索引/锁，与 _running_runs 的协程回收职责不同。
+        # Core 启动时创建的权限管理器跨 run/session 复用，独立于会话锁。
+        self._permission_manager: PermissionManager | None = None
+
+    # 记录提交会话的连接；直接调用 handler 的测试可以没有网络上下文。
+    def _remember_session(self, sid: str) -> None:
+        try:
+            writer = get_connection_writer()
+        except LookupError:
+            return
+        self._connection_sessions.setdefault(writer, set()).add(sid)
+
+    # 断连只结束已有审批等待，不把断连等同于取消整轮模型运行。
+    def _on_disconnect(self, writer: asyncio.StreamWriter) -> None:
+        for sid in self._connection_sessions.pop(writer, set()):
+            if self._permission_manager is not None:
+                self._permission_manager.cancel_session(sid)
 
     # ── 函数：_ping_handler ──
     # 用途：处理 core.ping 请求，返回服务版本、运行时长和接收时间
@@ -158,6 +178,7 @@ class CoreApp:
         assert self._sessions is not None
         cmd = AgentRunCommand.model_validate(params)
         session = await self._sessions.create(mode="one_shot", title=cmd.goal[:40])
+        self._remember_session(session.id)
         run_id = new_run_id()
         run_task = asyncio.create_task(
             self._sessions.send_message(session.id, cmd.goal, run_id=run_id)
@@ -171,16 +192,18 @@ class CoreApp:
         assert self._sessions is not None
         cmd = SessionCreateCommand.model_validate(params)
         session = await self._sessions.create(mode=cmd.mode, title=cmd.title)
+        self._remember_session(session.id)
         return SessionCreateResult(session_id=session.id, status=session.status)
 
     # 向 session 发送一条用户消息并同步等待对应 run 完成
     async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
         assert self._sessions is not None
         cmd = SessionSendMessageCommand.model_validate(params)
+        self._remember_session(cmd.session_id)
         # S4 的 chat 也纳入退出回收；await 保持 RPC 等待本轮完成的官方语义。
         run_task = asyncio.create_task(self._sessions.send_message(cmd.session_id, cmd.content))
         self._running_runs.add(run_task)
-        # 步骤 2：保存强引用；完成回调移除它。这里返回时模型可能尚未开始。
+        # 步骤2：保存强引用，完成回调移除；此 chat handler 仍等待本轮结束。
         run_task.add_done_callback(self._running_runs.discard)
         run_id = await run_task
         return SessionSendMessageResult(run_id=run_id)
@@ -192,10 +215,24 @@ class CoreApp:
         messages = await self._sessions.get_history(cmd.session_id)
         return SessionGetHistoryResult(messages=messages)
 
+    # 接收客户端权限审批响应，resolve 对应挂起的 Future
+    async def _permission_respond_handler(self, params: dict[str, Any]) -> PermissionRespondResult:
+        cmd = PermissionRespondCommand.model_validate(params)
+        logger.info(
+            "permission.respond received tool_use_id=%s decision=%s", cmd.tool_use_id, cmd.decision
+        )
+        if self._permission_manager is None:
+            logger.error("permission.respond: PermissionManager not initialized")
+            return PermissionRespondResult()
+        self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
+        return PermissionRespondResult()
+
     # 关闭 session 并返回 closed 状态
     async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
         assert self._sessions is not None
         cmd = SessionCloseCommand.model_validate(params)
+        if self._permission_manager is not None:
+            self._permission_manager.cancel_session(cmd.session_id, "session_closed")
         await self._sessions.close(cmd.session_id)
         return SessionCloseResult(status="closed")
 
@@ -210,9 +247,7 @@ class CoreApp:
         replayed_count = 0
         # 先发送历史再注册实时订阅；当前没有序号保证切换时无缝且不重复。
         if cmd.replay_from_run is not None:
-            replayed_count = await self._replay_events(
-                cmd.replay_from_run, writer, cmd.topics
-            )
+            replayed_count = await self._replay_events(cmd.replay_from_run, writer, cmd.topics)
 
         # 步骤 3：登记实时订阅并返回订阅信息。
         assert self._broadcaster is not None
@@ -230,8 +265,8 @@ class CoreApp:
         # 步骤 1：定位历史文件；不存在就返回零条。
         path = events_file(run_id)
         if not path.exists():
-            for candidate in Path("~/.kama/sessions").expanduser().glob(
-                f"*/runs/{run_id}/events.jsonl"
+            for candidate in (
+                Path("~/.kama/sessions").expanduser().glob(f"*/runs/{run_id}/events.jsonl")
             ):
                 path = candidate
                 break
@@ -270,13 +305,24 @@ class CoreApp:
         self._config = get_config()
         setup_logging(self._config)
 
-        # 步骤 2：先启动 trace，再接线广播器/会话工厂，最后注册七个 RPC 入口。
+        # 步骤 2：先启动 trace，再接线广播器/会话工厂，最后注册八个 RPC 入口。
         # Path.expanduser 将 ~ 展开到用户目录；trace=None 表示禁用所有这些采集点。
         if self._config.trace.enabled:
             trace_path = Path(self._config.trace.file).expanduser()
             self._trace = TraceWriter(trace_path)
             await self._trace.start()
             self._bus.subscribe(self._trace_event_handler)
+
+        policy_file = Path("~/.kama/policy.toml").expanduser()
+        self._permission_manager = PermissionManager(
+            policy_file=policy_file,
+            timeout_s=self._config.permission.timeout_s,
+        )
+        logger.info(
+            "permission manager: timeout_s=%.1f  persistent=%d entries",
+            self._config.permission.timeout_s,
+            len(load_policy_file(policy_file)),
+        )
 
         self._broadcaster = IpcEventBroadcaster(trace=self._trace)
         self._bus.subscribe(self._broadcaster.handle)
@@ -285,7 +331,12 @@ class CoreApp:
         self._sessions = SessionManager(
             # lambda 是延迟调用的工厂；每条消息运行时才创建独立 Runner。
             store,
-            runner_factory=lambda: AgentRunner(self._config, bus=self._bus, trace=self._trace),  # type: ignore[arg-type]
+            runner_factory=lambda: AgentRunner(
+                self._config,  # type: ignore[arg-type]
+                bus=self._bus,
+                trace=self._trace,
+                permission_manager=self._permission_manager,
+            ),
             bus=self._bus,
         )
 
@@ -294,6 +345,7 @@ class CoreApp:
             self._config.port,
             self._broadcaster,
             trace=self._trace,
+            on_disconnect=self._on_disconnect,
         )
         server.register("core.ping", self._ping_handler)
         server.register("agent.run", self._agent_run_handler)
@@ -302,6 +354,7 @@ class CoreApp:
         server.register("session.send_message", self._session_send_handler)
         server.register("session.get_history", self._session_history_handler)
         server.register("session.close", self._session_close_handler)
+        server.register("permission.respond", self._permission_respond_handler)
 
         # 步骤 3：启动监听并记录服务信息。
         # await 等待监听启动完成；已有连接的处理由事件循环继续调度。
@@ -323,7 +376,6 @@ class CoreApp:
             await server.stop()
             if self._trace is not None:
                 await self._trace.stop()
-
 
 
 # ── 函数：run ──

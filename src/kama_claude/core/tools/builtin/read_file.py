@@ -8,15 +8,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import BaseModel, ConfigDict
+
 from kama_claude.core.tools.base import BaseTool, ToolResult
 
 _MAX_BYTES = 512 * 1024  # 512 KB
 
 
-# ── 类：ReadFileTool ──
-# 职责：实现 read_file 工具，返回本地文件的文本内容。
+# 参数模型供公共调用器提前校验，也供 invoke 解析；schema 仍单独提供给模型。
+class ReadFileParams(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    path: str
+
+
 class ReadFileTool(BaseTool):
-    # 工具名称同时用于注册表查找和模型请求匹配；说明文字帮助模型选择工具。
+    params_model = ReadFileParams
     name = "read_file"
     description = (
         "Read the text content of a file. "
@@ -39,10 +45,7 @@ class ReadFileTool(BaseTool):
     # ── 函数：invoke ──
     # 用途：读取文件内容；超 512KB 截断；禁止 .. 路径遍历
     async def invoke(self, params: dict[str, object]) -> ToolResult:
-        # 步骤 1：取得 path 参数并检查路径片段。
-        # [] 取出 path 的值，缺少键会抛 KeyError；str 将它转为路径字符串。
-        # 通过 invoke_tool 调用时，缺键通常已被外层提前识别。
-        path_str = str(params["path"])
+        path_str = ReadFileParams.model_validate(params).path
 
         # parts 按当前平台拆分路径；这里只拒绝 ..，并没有拒绝绝对路径或限制根目录。
         if ".." in Path(path_str).parts:

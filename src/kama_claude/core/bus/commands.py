@@ -120,8 +120,21 @@ class SessionCloseResult(BaseModel):
     status: SessionStatus
 
 
+# 审批回应只关联 tool_use_id；Core 校验字段类型后交 Manager；decision 未限制枚举值。
+class PermissionRespondCommand(BaseModel):
+    type: Literal["permission.respond"] = "permission.respond"
+    tool_use_id: str
+    # "allow_once" | "always_allow" | "deny_once" | "always_deny"
+    decision: str
+
+
+# RPC 回应仅确认 handler 返回；不包含原工具的执行结果。
+class PermissionRespondResult(BaseModel):
+    ok: bool = True
+
+
 # 根据 type 字段决定命令类型的判别联合
-# Annotated 给类型附加元数据；Discriminator 按 type 区分七个命令模型。
+# Annotated 给类型附加元数据；Discriminator 按 type 区分八个命令模型。
 # 此处只声明联合类型，不执行校验；业务处理器显式调用各模型的 model_validate。
 # 当前 TCP ping 处理链也没有使用这个别名来分发，它按请求 method 查字典。
 Command = Annotated[
@@ -131,6 +144,7 @@ Command = Annotated[
     | SessionCreateCommand
     | SessionSendMessageCommand
     | SessionGetHistoryCommand
-    | SessionCloseCommand,
+    | SessionCloseCommand
+    | PermissionRespondCommand,
     Discriminator("type"),
 ]

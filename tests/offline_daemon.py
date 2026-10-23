@@ -5,7 +5,7 @@ from __future__ import annotations
 from kama_claude.core import runner
 from kama_claude.core.app import run
 from kama_claude.core.events.bus import EventBus
-from kama_claude.core.llm.types import LlmResponse
+from kama_claude.core.llm.types import LlmResponse, ToolCallBlock
 
 
 class OfflineProvider:
@@ -24,6 +24,12 @@ class OfflineProvider:
         step: int = 0,
         system: str | None = None,
     ) -> LlmResponse:
+        if step == 1 and str(messages[-1].get("content", "")).startswith("s5 permission"):
+            return LlmResponse(stop_reason="tool_use", tool_calls=[
+                ToolCallBlock(id=f"s5-{run_id}", name="write_file", input={
+                    "path": "s5-approved.txt", "content": "中文审批🧭",
+                }),
+            ])
         return LlmResponse(stop_reason="end_turn", text="offline test complete")
 
 

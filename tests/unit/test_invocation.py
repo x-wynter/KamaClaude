@@ -15,6 +15,10 @@ from kama_claude.core.tools.registry import ToolRegistry
 # --- stub tools --------------------------------------------------------------
 
 
+class _EchoParams(BaseModel):
+    msg: str
+
+
 class _EchoTool(BaseTool):
     name = "echo"
     description = "Echoes the msg param"
@@ -23,6 +27,7 @@ class _EchoTool(BaseTool):
         "properties": {"msg": {"type": "string"}},
         "required": ["msg"],
     }
+    params_model = _EchoParams
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         return ToolResult(content=str(params["msg"]))
