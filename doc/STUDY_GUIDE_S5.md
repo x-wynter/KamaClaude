@@ -4,7 +4,7 @@
 
 ## 目录
 
-- [1. 从 S4 到 S5](#1-从-s4-到-s5)
+- [1. 阶段目标与变化](#1-阶段目标与变化)
 - [2. 整体对象与生命周期](#2-整体对象与生命周期)
 - [3. 推荐阅读顺序](#3-推荐阅读顺序)
 - [4. 一次输入的完整旅程](#4-一次输入的完整旅程)
@@ -17,20 +17,85 @@
 - [11. 配置与 Windows 操作](#11-配置与-windows-操作)
 - [12. 测试练习与自测](#12-测试练习与自测)
 
-## 1. 从 S4 到 S5
+## 1. 阶段目标与变化
 
-S4 解决“怎样把多次对话放进一个会话”。S5 在模型提出工具请求之后、真正调用 Python 工具之前，加入参数校验、权限判断、必要的用户审批，以及可分类的失败与有限重试。
+S4 主要回答“下一次输入怎样接着上一次对话继续”；S5 回答“模型提出工具请求后，程序怎样判断能否执行、向用户询问，并在失败时继续决策”。主线仍是 CoreApp → SessionManager → AgentRunner → AgentLoop → Provider；新增机制接在 **Loop → invoke_tool → 实际工具** 之间。
 
-| 范围 | S5 的变化 |
-| --- | --- |
-| 权限 | 新增 PermissionManager、静态规则与 policy.toml；Core 中所有模型工具调用均经过公共调用器。 |
-| 参数 | bash/read_file/write_file/list_dir/note_save 新增 Pydantic 参数模型；task_* 仍由工具自行检查。 |
-| 失败 | ToolCallFailedEvent 将 error_type 改为 error_class，增加 attempt；ToolResult 仍叫 error_type。 |
-| 网络 | 同连接每条请求 create_task，长 send_message 不再挡住 permission.respond。 |
-| TUI | 长 RPC 放进 worker，显示审批摘要与键盘选项；增加文件日志。 |
-| 保持 | 会话完整历史、主动 notes、顺序工具执行、每 run 新建 TaskManager，均延续 S4。 |
+下面的表格既是阶段地图，也是带着问题读源码的清单。按 1.1～1.6 阅读，先能用自己的话回答“学习问题”，再打开源码核对。每行给出简要答案，源码位置精确到主要类、函数或字段；同一个文件出现多次，是因为它参与不同环节。
 
-S5 没有实现语义检索、历史自动压缩、自动任务调度或操作系统级沙箱。不能把“权限审批”理解成隔离运行环境。
+标记说明：**新增**是官方 S5 新机制，**变化**是 S5 调整的旧路径，**延续**是理解 S5 必须掌握的已有机制，**学习分支**是本分支保留或补充的兼容、清理修复。后文第 2～12 节再展开细节。
+
+### 1.1 先看整体：S5 在原有主线中改变了什么
+
+| 编号 | 学习问题 | 相对 S4 的变化与答案要点 | 源码位置 |
+| --- | --- | --- | --- |
+| 1 | S5 的目标是什么？权限检查插在模型调用前，还是工具执行前？ | **新增**：模型先提出 tool_use，Loop 再调用 invoke_tool；调用器在真正 tool.invoke 前做参数校验、权限判断和必要审批。创建 session 不会调用模型，也不会触发审批。 | [loop.py](../src/kama_claude/core/loop.py)：AgentLoop.run；[invocation.py](../src/kama_claude/core/tools/invocation.py)：invoke_tool |
+| 2 | CoreApp、SessionManager、Runner、Loop 分别负责什么？谁创建和复用权限管理器？ | **变化**：Core 启动创建一份 PermissionManager；每条消息仍由 Manager 创建新 Runner；Runner 把同一权限管理器及 session_id 传给 Loop，再交调用器。权限缓存因此可跨 run/session 生效。 | [app.py](../src/kama_claude/core/app.py)：CoreApp.run；[session/manager.py](../src/kama_claude/core/session/manager.py)：send_message；[runner.py](../src/kama_claude/core/runner.py)：__init__、run_and_capture |
+| 3 | 工具 schema、tool_use、参数模型、invoke 和 tool_result 有什么区别？ | **变化**：schema 向模型说明工具；tool_use 是模型的请求；params_model 是本地校验类；invoke 才执行副作用；ToolResult 经 Context 转成 tool_result 返回模型。新增校验不会让 schema 本身变成可执行代码。 | [registry.py](../src/kama_claude/core/tools/registry.py)：ToolRegistry；[base.py](../src/kama_claude/core/tools/base.py)：BaseTool、ToolResult；[llm/types.py](../src/kama_claude/core/llm/types.py)：ToolCallBlock；[context.py](../src/kama_claude/core/context.py)：add_tool_result |
+| 4 | LLMProvider、AnthropicProvider、TracingProvider 谁真正请求模型？S5 改变这层分工了吗？ | **延续**：Protocol 定义接口，Anthropic 实现调用异步 SDK，TracingProvider 包装并记录请求/响应/api_error，同时透传 system；权限检查由工具调用器承担。 | [llm/base.py](../src/kama_claude/core/llm/base.py)：LLMProvider；[llm/provider.py](../src/kama_claude/core/llm/provider.py)：AnthropicProvider.chat；[trace/provider.py](../src/kama_claude/core/trace/provider.py)：TracingProvider.chat |
+| 5 | 哪些工具新增参数校验？参数不合法时会先弹审批吗？ | **新增**：bash、read_file、write_file、list_dir、note_save 有 Pydantic 参数模型；调用器先校验，失败返回 schema_error，不进入审批。task_* 没有 params_model，仍自行检查；调用器不保留转换后的实例，内置工具会再次解析。 | [invocation.py](../src/kama_claude/core/tools/invocation.py)：invoke_tool 校验分支；[bash.py](../src/kama_claude/core/tools/builtin/bash.py)：BashParams；[read_file.py](../src/kama_claude/core/tools/builtin/read_file.py)：ReadFileParams；[write_file.py](../src/kama_claude/core/tools/builtin/write_file.py)：WriteFileParams；[list_dir.py](../src/kama_claude/core/tools/builtin/list_dir.py)：ListDirParams；[note_save.py](../src/kama_claude/core/tools/builtin/note_save.py)：NoteSaveParams |
+
+### 1.2 再看规则：哪些调用允许、拒绝或询问
+
+| 编号 | 学习问题 | 相对 S4 的变化与答案要点 | 源码位置 |
+| --- | --- | --- | --- |
+| 6 | ALLOW、DENY、ASK 是什么？默认哪些工具需要人决定？ | **新增**：read_file/list_dir/note_save 默认 ALLOW；bash/write_file 默认 ASK；未登记策略的 task_* 也 ASK。没有默认黑名单命令集合，deny_patterns 默认是空列表。 | [policy.py](../src/kama_claude/core/permissions/policy.py)：PermissionDecision、ToolPolicy、DEFAULT_POLICIES、_UNKNOWN_TOOL_DEFAULT |
+| 7 | 黑名单、越界启发式、always 缓存、白名单与默认值谁优先？ | **新增**：顺序为 bash deny_patterns → outside-cwd 强制 ASK → 会话缓存 → 全局持久缓存 → bash allow_patterns → 工具默认值。前两层不被 always_allow 跳过。 | [manager.py](../src/kama_claude/core/permissions/manager.py)：PermissionManager.check_and_wait |
+| 8 | policy.evaluate 与 check_and_wait 为什么不能互换？ | **新增**：evaluate 只做四层静态规则评估；check_and_wait 还查两级缓存，并能广播和等待审批。前者返回三态决定，后者返回 allowed 与决定字符串。 | [policy.py](../src/kama_claude/core/permissions/policy.py)：evaluate；[manager.py](../src/kama_claude/core/permissions/manager.py)：evaluate、check_and_wait |
+| 9 | outside-cwd 怎样判断？工具名 bash 在 Windows 上真的运行 Git Bash 吗？ | **新增规则＋延续执行方式**：规则用正则识别部分 POSIX 路径、变量和 cd；不完整覆盖 Windows 盘符、反斜线和变量。工具未指定 executable，Windows 通常用 cmd.exe；规则与实际 shell 不是完整统一的沙箱。 | [policy.py](../src/kama_claude/core/permissions/policy.py)：OUTSIDE_CWD_HEURISTICS、matches_outside_cwd；[bash.py](../src/kama_claude/core/tools/builtin/bash.py)：BashTool.invoke |
+| 10 | “允许一次”和“总是允许”分别记住什么？换 run/session 还有效吗？ | **新增**：once 只影响本次；always 同时写入按 session_id/tool_name 的缓存及按 tool_name 的全局缓存，后者可跨 session。记住的是工具名，不是这条命令或路径；跨 run 的历史共享与权限缓存是两件事。 | [manager.py](../src/kama_claude/core/permissions/manager.py)：_session_always、_persistent_always、_apply_response |
+| 11 | always 保存在哪里？何时加载？保存失败或手改文件会怎样？ | **新增**：Core 启动读取 ~/.kama/policy.toml，always 决定后覆盖写入；保存失败记录日志，内存仍生效；手改后须重启 Core。存储只解析简单 [always] 行，没有原子替换或通用 TOML 保真编辑。 | [app.py](../src/kama_claude/core/app.py)：CoreApp.run 的 policy_file；[manager.py](../src/kama_claude/core/permissions/manager.py)：__init__、_apply_response；[storage.py](../src/kama_claude/core/permissions/storage.py)：load_policy_file、save_policy_file |
+| 12 | 权限是否覆盖所有实际执行入口？能否换工具执行相同操作？ | **新增机制的边界**：Core 模型执行主线经过调用器；直接 tool.invoke 或不传 Manager 的 Python Runner 可跳过审批。read_file 默认允许且路径检查不禁止所有绝对路径，获准的 shell 也能写文件；没有按操作类别统一防绕过。 | [invocation.py](../src/kama_claude/core/tools/invocation.py)：permission_manager 条件分支；[runner.py](../src/kama_claude/core/runner.py)：__init__；[read_file.py](../src/kama_claude/core/tools/builtin/read_file.py)：invoke；[write_file.py](../src/kama_claude/core/tools/builtin/write_file.py)：invoke |
+
+### 1.3 沿审批走一圈：请求怎样等到用户决定
+
+| 编号 | 学习问题 | 相对 S4 的变化与答案要点 | 源码位置 |
+| --- | --- | --- | --- |
+| 13 | ASK 时保存了什么？为什么先登记 Future，再发布事件？ | **新增**：_PendingRequest 保存 Future、session_id、tool_name，索引用 tool_use_id。Future 是未来的决定；先登记可接住广播回调立即 respond 的情况，await 期间其他协程仍可运行。 | [manager.py](../src/kama_claude/core/permissions/manager.py)：_PendingRequest、_pending、check_and_wait |
+| 14 | 审批请求、用户决定与原工具调用怎样关联？三个 ID 各做什么？ | **新增**：permission.requested 带 run_id、session_id、tool_use_id；respond 命令用 tool_use_id 找 Future。run_id 标识一轮，session_id 标识对话，tool_use_id 标识模型的一次工具请求。 | [bus/events.py](../src/kama_claude/core/bus/events.py)：PermissionRequestedEvent；[bus/commands.py](../src/kama_claude/core/bus/commands.py)：PermissionRespondCommand；[app.py](../src/kama_claude/core/app.py)：_permission_respond_handler |
+| 15 | 四种用户决定如何唤醒原调用？无效或迟到回应怎样处理？ | **新增**：respond 取出 pending 并 set_result；等待者继续做 _apply_response。decision 当前只校验 str，未知值按拒绝处理；找不到 pending 则记日志，不执行原工具；RPC ok 不证明工具已成功。 | [manager.py](../src/kama_claude/core/permissions/manager.py)：respond、_apply_response；[bus/commands.py](../src/kama_claude/core/bus/commands.py)：PermissionRespondCommand、PermissionRespondResult |
+| 16 | 审批等待多久？0 表示什么？超时会修改 always 吗？ | **新增**：默认 60 秒，KAMA_PERMISSION_TIMEOUT_S 或 [permission].timeout_s 可改；0 无限等待。超时返回 False/timeout，不更新 always，调用器转成拒绝事件与 permission_denied 结果。 | [config.py](../src/kama_claude/core/config.py)：PermissionConfig、_apply_toml、_apply_env；[manager.py](../src/kama_claude/core/permissions/manager.py)：check_and_wait；[invocation.py](../src/kama_claude/core/tools/invocation.py)：拒绝分支 |
+| 17 | 同一工具 ID 在并发 run 重复会怎样？回应是否核对连接归属？ | **当前边界**：pending 全局仅按 tool_use_id 建索引，可能相互覆盖；respond 未校验会话或连接归属。事件携带更多 ID、磁盘目录按 session 隔离，都不代表关联已在所有入口严格校验。 | [manager.py](../src/kama_claude/core/permissions/manager.py)：_pending、check_and_wait、respond；[app.py](../src/kama_claude/core/app.py)：_permission_respond_handler |
+
+### 1.4 观察交互：TUI、网络与事件怎样配合
+
+| 编号 | 学习问题 | 相对 S4 的变化与答案要点 | 源码位置 |
+| --- | --- | --- | --- |
+| 18 | 用户输入怎样发出去？等待模型时为什么还能按审批键？ | **变化**：ChatTextArea 发本地 Submitted 消息；App 设置 busy 后用 run_worker 执行长 send_message RPC，Textual 消息泵继续处理键盘，socket worker 继续接收事件。 | [tui/app.py](../src/kama_claude/tui/app.py)：ChatTextArea._on_key、on_chat_text_area_submitted、_do_send_message、_socket_loop |
+| 19 | ASK 在哪里显示？按键如何变成 permission.respond？ | **新增**：permission.requested 创建日志摘要 PermissionBlock，以及挂在 prompt 前的 PermissionSelect；方向键/Enter 或 y/a/n/d 产生本地 Decided 消息，App 再发送 RPC。预览由 param_preview 截取，不代替实际参数。 | [tui/app.py](../src/kama_claude/tui/app.py)：_handle_event_inner、PermissionBlock、PermissionSelect.on_key、on_permission_select_decided、_mount_permission_select；[policy.py](../src/kama_claude/core/permissions/policy.py)：param_preview |
+| 20 | Core 已经在等待 send_message，为什么同一 socket 还能处理审批回应？ | **变化**：服务端每读一行都 create_task 分派，不再串行 await 长 handler；ContextVar 保存各请求所属 writer。网络读循环、长请求、run 和审批 Future 是不同对象。 | [transport/socket_server.py](../src/kama_claude/core/transport/socket_server.py)：_read_loop、_handle_line、get_connection_writer；[app.py](../src/kama_claude/core/app.py)：_session_send_handler、_permission_respond_handler |
+| 21 | RPC 响应与主动事件推送怎么区分？drain 成功代表用户看到了吗？ | **延续**：SocketClient 按响应 id 完成 RPC Future，event 推送交事件回调；drain 只等待写缓冲流控，不保证接收或显示。审批摘要先更新，也不能单独证明 Core 已确认。 | [transport/socket_client.py](../src/kama_claude/core/transport/socket_client.py)：send_command、run_event_loop、_dispatch；[bus/envelope.py](../src/kama_claude/core/bus/envelope.py)：协议外壳；[transport/socket_server.py](../src/kama_claude/core/transport/socket_server.py)：_send |
+| 22 | 事件从哪里来？自动允许/拒绝也一定有 permission 事件吗？ | **变化＋延续**：调用器发布审批事件；EventBus.subscribe 保存回调，publish 顺序 await。auto_allow/auto_deny 不单独发 granted/denied；静态拒绝仍发 tool.call_failed。定义事件不等于每条路径都会发布或显示。 | [invocation.py](../src/kama_claude/core/tools/invocation.py)：_emit_permission、允许/拒绝分支；[events/bus.py](../src/kama_claude/core/events/bus.py)：subscribe、publish；[transport/ipc_broadcaster.py](../src/kama_claude/core/transport/ipc_broadcaster.py)：handle |
+| 23 | CLI chat 与 TUI 都有审批文字，为什么实际交互能力不同？ | **变化的边界**：CLI 增加决定映射，但主循环 await send_message 时无法再 readline，ASK 会等超时；TUI 的 worker 才形成可用的同连接键盘闭环。 | [cli/commands/chat.py](../src/kama_claude/cli/commands/chat.py)：ChatPrinter.handle、_chat_async；[tui/app.py](../src/kama_claude/tui/app.py)：_do_send_message、on_permission_select_decided |
+| 24 | 怎样查看审批和失败？事件文件、统一 trace、TUI 日志分别记录什么？ | **新增日志＋延续观测**：events.jsonl 保存业务事件；trace 汇总 IPC/event/LLM，TraceWriter 用队列消费；tui.log 保存客户端日志，默认 UTF-8 滚动文件。三者均不同于模型消息历史。 | [events/writer.py](../src/kama_claude/core/events/writer.py)：EventWriter；[app.py](../src/kama_claude/core/app.py)：_trace_event_handler；[trace/writer.py](../src/kama_claude/core/trace/writer.py)：TraceWriter；[tui/__main__.py](../src/kama_claude/tui/__main__.py)：_setup_logging；[cli/commands/trace.py](../src/kama_claude/cli/commands/trace.py) |
+| 25 | 多个会话、重连和历史回放时，审批控件会自动正确隔离吗？ | **当前边界**：TUI 订阅 global，未完整按 session/run 过滤，也未在重连时统一清掉旧审批控件；回放的 requested 不代表现在仍有 Future 等待。理解单会话闭环后，还要区分事件显示与有效审批。 | [tui/app.py](../src/kama_claude/tui/app.py)：_socket_loop、_handle_event_inner、_pending_permission_blocks；[transport/ipc_broadcaster.py](../src/kama_claude/core/transport/ipc_broadcaster.py)：subscribe、handle；[app.py](../src/kama_claude/core/app.py)：_subscribe_handler、_replay_events |
+
+### 1.5 继续执行：失败、重试、模型历史与会话
+
+| 编号 | 学习问题 | 相对 S4 的变化与答案要点 | 源码位置 |
+| --- | --- | --- | --- |
+| 26 | 工具错误分几类？error_class、error_type、异常类是同一个东西吗？ | **变化**：失败事件用 error_class，ToolResult 仍用 error_type；分类有 schema_error、permission_denied、timeout、runtime_error、rate_limited。RateLimitedError 被实际捕获；PermissionDeniedError 仅定义/导出，主线拒绝返回结果。 | [bus/events.py](../src/kama_claude/core/bus/events.py)：ToolCallFailedEvent；[tools/base.py](../src/kama_claude/core/tools/base.py)：ToolResult；[tools/errors.py](../src/kama_claude/core/tools/errors.py)：RateLimitedError；[permissions/errors.py](../src/kama_claude/core/permissions/errors.py)：PermissionDeniedError；[invocation.py](../src/kama_claude/core/tools/invocation.py)：_fail、invoke_tool |
+| 27 | 哪些失败会重试？最多几次？是否重新审批？ | **新增**：runtime_error/rate_limited 最多执行三次，退避 2、4 秒；审批只做一次。schema_error、permission_denied、timeout 不重试；未知工具在查表处直接返回，不进入重试循环。 | [invocation.py](../src/kama_claude/core/tools/invocation.py)：_RETRYABLE、_MAX_RETRIES、_RETRY_BASE_S、invoke_tool |
+| 28 | 审批超时、工具外层超时、bash 自己的超时和总耗时各算什么？ | **变化**：审批有独立配置；每次 invoke 外层默认 120 秒；bash 默认内部 60 秒，参数 1～120。退避和审批不占单次执行 timeout，elapsed_ms 却从最初累计；不存在统一的整轮 120 秒预算。 | [config.py](../src/kama_claude/core/config.py)：PermissionConfig；[invocation.py](../src/kama_claude/core/tools/invocation.py)：elapsed、wait_for；[bash.py](../src/kama_claude/core/tools/builtin/bash.py)：BashParams、invoke |
+| 29 | 重试是否回滚副作用？TUI 会准确展示每次尝试的最终状态吗？ | **新增机制的边界**：失败可能发生在部分操作已完成之后，重试可重复副作用；attempt 标记失败次数。TUI 首次 failed 就移除待工具索引，后续成功未必更新原块，应结合事件日志核对。 | [invocation.py](../src/kama_claude/core/tools/invocation.py)：重试循环；[bus/events.py](../src/kama_claude/core/bus/events.py)：ToolCallFailedEvent.attempt；[tui/app.py](../src/kama_claude/tui/app.py)：_handle_event_inner 的 tool.call_failed/finished |
+| 30 | 工具被拒绝或最终失败，模型怎样知道并继续？多个工具请求是否并行？ | **延续＋新增错误类别**：Loop 顺序 await 每个工具，把最终 ToolResult 写为 tool_result；错误带 is_error。多个结果合并到同一条 user 消息，下一 step 模型继续判断；中间重试失败事件不会逐条写入模型历史。 | [loop.py](../src/kama_claude/core/loop.py)：AgentLoop.run；[context.py](../src/kama_claude/core/context.py)：add_assistant_message、add_tool_result；[invocation.py](../src/kama_claude/core/tools/invocation.py)：invoke_tool 返回点 |
+| 31 | session、run、step、业务 Task 与 asyncio.Task 如何区分？会话状态能说明是否忙吗？ | **延续**：session 包含多次 run，step 是模型请求次数；业务 Task 是待办数据，asyncio.Task 调度协程。Session.status 与 Context.status 独立，忙碌由会话锁判断；end_turn 不保证待办全部完成。 | [session/model.py](../src/kama_claude/core/session/model.py)：Session；[session/manager.py](../src/kama_claude/core/session/manager.py)：_locks、send_message；[context.py](../src/kama_claude/core/context.py)：ExecutionContext；[task/model.py](../src/kama_claude/core/task/model.py)：Task |
+| 32 | S5 还怎样保存历史与 notes？失败、取消后下次会读到什么？ | **延续**：Manager 先保存用户输入，Runner 收尾只追加历史增量并附 run_id；Store 读入时去元数据、裁掉未配对工具尾部，裁剪不改原文件。note_save 由模型决定调用，写入 notes.md，下一 run 才重新加载到 system；无自动检索/压缩。 | [runner.py](../src/kama_claude/core/runner.py)：run_and_capture 的 prefill_len 与收尾；[session/store.py](../src/kama_claude/core/session/store.py)：append_messages、read_messages、_trim_orphan_tool_use、read_notes；[note_save.py](../src/kama_claude/core/tools/builtin/note_save.py)：invoke |
+| 33 | task_* 受审批后就有自动调度、跨 run 共享或依赖执行门禁了吗？ | **权限新增、任务机制延续**：默认 task_* 走未知工具 ASK；依赖仍由模型提出、TaskManager 保存，completed 只解除依赖，不自动执行后继。Runner 每 run 新建 TaskManager，历史知道旧 ID 不代表能直接操作旧目录。 | [policy.py](../src/kama_claude/core/permissions/policy.py)：默认与未知工具规则；[runner.py](../src/kama_claude/core/runner.py)：_build_registry、run_and_capture；[task/manager.py](../src/kama_claude/core/task/manager.py)：create、update |
+
+### 1.6 最后查收尾：断连、退出、配置与验证
+
+| 编号 | 学习问题 | 相对 S4 的变化与答案要点 | 源码位置 |
+| --- | --- | --- | --- |
+| 34 | 等待审批时 run 被取消，或广播事件抛异常，Future 会不会遗留？ | **学习分支**：登记后的广播与等待纳入 try/finally，删除 pending，并取消仍未完成的 Future；取消继续传播。普通业务失败返回 ToolResult，不代表所有异常都被吞掉。 | [manager.py](../src/kama_claude/core/permissions/manager.py)：check_and_wait 的 finally；[runner.py](../src/kama_claude/core/runner.py)：run_and_capture 的 CancelledError 分支 |
+| 35 | 断开 socket、退出 TUI、关闭 session、取消 run 是同一件事吗？ | **学习分支＋既有语义**：断连按连接关联的 session 拒绝当时已有审批，不取消整轮；后续新 ASK 仍可能等待。close 先拒绝已有审批，忙时仍报 SESSION_BUSY；TUI 退出尽力 close，失败也退出。 | [app.py](../src/kama_claude/core/app.py)：_remember_session、_on_disconnect、_session_close_handler；[manager.py](../src/kama_claude/core/permissions/manager.py)：cancel_session；[session/manager.py](../src/kama_claude/core/session/manager.py)：close；[tui/app.py](../src/kama_claude/tui/app.py)：action_quit |
+| 36 | Core 退出时怎样回收 one_shot/chat、并发 RPC 和 shell？ | **学习分支**：先取消并等待活动 run，再停止 server/trace；服务端保存请求 Task 并在 stop 时回收；bash 被取消后 kill 并等待直接子进程，不保证整个进程树。 | [app.py](../src/kama_claude/core/app.py)：CoreApp.run 的 finally、_running_runs；[transport/socket_server.py](../src/kama_claude/core/transport/socket_server.py)：_requests、_request_done、stop；[bash.py](../src/kama_claude/core/tools/builtin/bash.py)：CancelledError 分支 |
+| 37 | 新审批配置怎样覆盖默认值？修改配置或 policy 是否需要重启？ | **新增＋延续配置链**：默认 → TOML → .env → 已有环境变量；.env 先补入环境，才能选择 KAMA_CONFIG。审批超时在 Core 加载，修改后重启 Core；policy 也不热加载；TUI 日志/连接配置由 TUI 自己加载。 | [config.py](../src/kama_claude/core/config.py)：get_config、_apply_toml、_apply_env；[app.py](../src/kama_claude/core/app.py)：run；[tui/__main__.py](../src/kama_claude/tui/__main__.py)：main、_setup_logging |
+| 38 | Windows、中文/emoji 和旧 trace 的兼容修复还在哪？ | **学习分支延续**：跨平台信号恢复、PID 存活查询、无窗口 Core 启动、任务/trace 显式 UTF-8、旧 GB18030 与 UTF-8 逐行兼容均保留；强制结束进程不保证 finally，shell 输出也不保证传统编码无乱码。 | [app.py](../src/kama_claude/core/app.py)：_wait_for_shutdown；[cli/commands/core.py](../src/kama_claude/cli/commands/core.py)；[task/manager.py](../src/kama_claude/core/task/manager.py)；[trace/writer.py](../src/kama_claude/core/trace/writer.py)；[cli/commands/trace.py](../src/kama_claude/cli/commands/trace.py)；[bash.py](../src/kama_claude/core/tools/builtin/bash.py)：invoke |
+| 39 | 怎样不调用付费模型，就证明规则、执行、TUI 及清理真正连通？ | **新增验证**：静态规则/Manager/参数/重试单测覆盖分支；fake Provider 驱动真实 Runner；Pilot 通过真实 TCP 按 y/n，核对文件与 thread；断连/取消测试核对收尾。夹具隔离用户目录与配置，--ignore 排除真实模型模块的收集。 | [test_permission_policy.py](../tests/unit/test_permission_policy.py)、[test_permission_manager.py](../tests/unit/test_permission_manager.py)、[test_tool_params.py](../tests/unit/test_tool_params.py)、[test_tool_retry.py](../tests/unit/test_tool_retry.py)；[test_s5_permission_flow.py](../tests/integration/test_s5_permission_flow.py)、[test_s5_tui_offline.py](../tests/integration/test_s5_tui_offline.py)、[test_s5_cleanup.py](../tests/unit/test_s5_cleanup.py)；[conftest.py](../tests/conftest.py)、[offline_daemon.py](../tests/offline_daemon.py) |
+| 40 | 新增 permission.respond 和权限事件后，怎样保证协议文档跟着变化？ | **变化**：commands/events 定义数据与联合类型，Core 另行注册 handler；生成器从模型生成 WIRE_PROTOCOL.md，--check 检查同步。定义命令类型、接入处理器、同步协议是三个步骤。 | [bus/commands.py](../src/kama_claude/core/bus/commands.py)：Command；[bus/events.py](../src/kama_claude/core/bus/events.py)：Event；[app.py](../src/kama_claude/core/app.py)：CoreApp.run；[gen_protocol_doc.py](../scripts/gen_protocol_doc.py)、[WIRE_PROTOCOL.md](../WIRE_PROTOCOL.md) |
+
+读完后，用“模型提出请求 → 校验 → 规则/缓存 → 必要时等待 TUI 决定 → 执行/有限重试 → 结果进入历史 → 模型继续 → 保存与清理”复述一次完整过程。如果还能说明每一步由谁负责、等待什么、失败后去哪里，就已经掌握 S5 的主体；接下来按第 3 节进入源码细读。
 
 ## 2. 整体对象与生命周期
 
