@@ -1,6 +1,6 @@
 # ═══ 文件职责：配置定义与分层加载 ═══
 # 协作关系：Core、CLI、TUI 各自调用 get_config，得到自己的配置对象。
-# 阅读路线：先看六个 dataclass，再读 get_config；最后展开 TOML 和环境变量覆盖规则。
+# 阅读路线：先看配置 dataclass，再读 get_config；最后展开 TOML 和环境变量覆盖规则。
 # 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
 
 # ── 依赖导入 ──
@@ -80,6 +80,15 @@ class PermissionConfig:
 
 
 @dataclass
+# 阈值接入 Loop；L1 长度字段目前仅解析，Store 仍使用函数默认值。
+class CompactionConfig:
+    # 0 禁用自动压缩；非零时由 Loop 比较 context_pct。
+    auto_threshold: float = 0.0
+    tool_result_limit: int = 8_000  # tool_result 截断触发字符数
+    tool_result_keep: int = 4_000  # 截断后保留的前缀字符数
+
+
+@dataclass
 # 汇总全部配置，每个进程各自加载；default_factory 独立创建各小节对象。
 class KamaConfig:
     # 字段：Core 监听或客户端连接的主机地址。
@@ -94,6 +103,7 @@ class KamaConfig:
     llm: LlmConfig = field(default_factory=LlmConfig)
     trace: TraceConfig = field(default_factory=TraceConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
+    compaction: CompactionConfig = field(default_factory=CompactionConfig)
 
 
 # ── 函数：get_config ──
@@ -136,8 +146,15 @@ def get_config() -> KamaConfig:
 # ── 函数：_apply_toml ──
 # 用途：将已解析的 TOML 根表写入 config；未知小节或类型错误时退出进程
 def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
-    # 步骤1：校验顶层章节，S5 额外允许 permission。
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission"}
+    unknown = set(data.keys()) - {
+        "core",
+        "logging",
+        "agent",
+        "llm",
+        "trace",
+        "permission",
+        "compaction",
+    }
     if unknown:
         # sorted 排序得到列表，join 用逗号拼接，保证错误信息顺序稳定。
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
@@ -253,6 +270,37 @@ def _apply_toml(config: KamaConfig, data: dict[str, Any]) -> None:
                 raise SystemExit("Config error: permission.timeout_s must be a non-negative number")
             config.permission.timeout_s = float(val)
 
+    if "compaction" in data:
+        comp = data["compaction"]
+        if not isinstance(comp, dict):
+            raise SystemExit("Config error: [compaction] must be a table")
+        unknown_comp: set[str] = set(comp.keys()) - {
+            "auto_threshold",
+            "tool_result_limit",
+            "tool_result_keep",
+        }
+        if unknown_comp:
+            raise SystemExit(f"Unknown [compaction] keys: {', '.join(sorted(unknown_comp))}")
+        if "auto_threshold" in comp:
+            val = comp["auto_threshold"]
+            if not isinstance(val, (int, float)) or not (0.0 <= val <= 1.0):
+                raise SystemExit("Config error: compaction.auto_threshold must be between 0 and 1")
+            config.compaction.auto_threshold = float(val)
+        if "tool_result_limit" in comp:
+            val = comp["tool_result_limit"]
+            if not isinstance(val, int) or val <= 0:
+                raise SystemExit(
+                    "Config error: compaction.tool_result_limit must be a positive integer"
+                )
+            config.compaction.tool_result_limit = val
+        if "tool_result_keep" in comp:
+            val = comp["tool_result_keep"]
+            if not isinstance(val, int) or val <= 0:
+                raise SystemExit(
+                    "Config error: compaction.tool_result_keep must be a positive integer"
+                )
+            config.compaction.tool_result_keep = val
+
 
 # ── 函数：_apply_env ──
 # 用途：用 KAMA_* 环境变量覆盖 config 中对应字段（若变量已设置）
@@ -323,13 +371,60 @@ def _apply_env(config: KamaConfig) -> None:
     perm_timeout = os.environ.get("KAMA_PERMISSION_TIMEOUT_S")
     if perm_timeout is not None:
         try:
-            permission_seconds = float(perm_timeout)
-            if permission_seconds < 0:
+            perm_timeout_val = float(perm_timeout)
+            if perm_timeout_val < 0:
                 raise SystemExit(
                     f"Config error: KAMA_PERMISSION_TIMEOUT_S must be >= 0, got: {perm_timeout!r}"
                 )
-            config.permission.timeout_s = permission_seconds
+            config.permission.timeout_s = perm_timeout_val
         except ValueError:
             raise SystemExit(
                 f"Config error: KAMA_PERMISSION_TIMEOUT_S must be a number, got: {perm_timeout!r}"
+            )
+
+    compact_threshold = os.environ.get("KAMA_COMPACT_THRESHOLD")
+    if compact_threshold is not None:
+        try:
+            compact_threshold_val = float(compact_threshold)
+            if not (0.0 <= compact_threshold_val <= 1.0):
+                raise SystemExit(
+                    "Config error: KAMA_COMPACT_THRESHOLD must be between 0 and 1, "
+                    f"got: {compact_threshold!r}"
+                )
+            config.compaction.auto_threshold = compact_threshold_val
+        except ValueError:
+            raise SystemExit(
+                f"Config error: KAMA_COMPACT_THRESHOLD must be a number, got: {compact_threshold!r}"
+            )
+
+    compact_tool_limit = os.environ.get("KAMA_COMPACT_TOOL_LIMIT")
+    if compact_tool_limit is not None:
+        try:
+            compact_tool_limit_val = int(compact_tool_limit)
+            if compact_tool_limit_val <= 0:
+                raise SystemExit(
+                    "Config error: KAMA_COMPACT_TOOL_LIMIT must be a positive integer, "
+                    f"got: {compact_tool_limit!r}"
+                )
+            config.compaction.tool_result_limit = compact_tool_limit_val
+        except ValueError:
+            raise SystemExit(
+                "Config error: KAMA_COMPACT_TOOL_LIMIT must be an integer, "
+                f"got: {compact_tool_limit!r}"
+            )
+
+    compact_tool_keep = os.environ.get("KAMA_COMPACT_TOOL_KEEP")
+    if compact_tool_keep is not None:
+        try:
+            compact_tool_keep_val = int(compact_tool_keep)
+            if compact_tool_keep_val <= 0:
+                raise SystemExit(
+                    "Config error: KAMA_COMPACT_TOOL_KEEP must be a positive integer, "
+                    f"got: {compact_tool_keep!r}"
+                )
+            config.compaction.tool_result_keep = compact_tool_keep_val
+        except ValueError:
+            raise SystemExit(
+                "Config error: KAMA_COMPACT_TOOL_KEEP must be an integer, "
+                f"got: {compact_tool_keep!r}"
             )

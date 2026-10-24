@@ -20,6 +20,8 @@ class UsageStats:
     # 缺省为 0，表示调用方未提供缓存计数；不会在这里计算费用。
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
+    # Provider 的占用估算，供 Loop 触发阈值与 TUI 展示。
+    context_pct: float = 0.0
 
 
 # ── 类：ToolCallBlock ──

@@ -1,6 +1,6 @@
 # ═══ 文件职责：命令参数与业务结果的数据模型 ═══
 # 协作关系：客户端发送 params；Core 校验业务参数，返回结果后由传输层添加协议外壳。
-# 阅读路线：ping → agent.run → event.subscribe → 四组 session 命令；最后看类型联合。
+# 阅读路线：ping → agent.run → event.subscribe → 五组 session 命令与权限回应；最后看类型联合。
 # 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
 
 # ── 依赖导入 ──
@@ -133,8 +133,20 @@ class PermissionRespondResult(BaseModel):
     ok: bool = True
 
 
+# focus 可指定摘要重点；TUI 当前固定传空字符串。
+class SessionCompactCommand(BaseModel):
+    type: Literal["session.compact"] = "session.compact"
+    session_id: str
+    focus: str = ""
+
+
+class SessionCompactResult(BaseModel):
+    summary_tokens: int
+    saved_tokens: int
+
+
 # 根据 type 字段决定命令类型的判别联合
-# Annotated 给类型附加元数据；Discriminator 按 type 区分八个命令模型。
+# Annotated 给类型附加元数据；Discriminator 按 type 区分九个命令模型。
 # 此处只声明联合类型，不执行校验；业务处理器显式调用各模型的 model_validate。
 # 当前 TCP ping 处理链也没有使用这个别名来分发，它按请求 method 查字典。
 Command = Annotated[
@@ -145,6 +157,7 @@ Command = Annotated[
     | SessionSendMessageCommand
     | SessionGetHistoryCommand
     | SessionCloseCommand
-    | PermissionRespondCommand,
+    | PermissionRespondCommand
+    | SessionCompactCommand,
     Discriminator("type"),
 ]

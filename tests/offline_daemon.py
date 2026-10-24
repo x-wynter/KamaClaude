@@ -2,7 +2,7 @@
 # conftest 在临时工作目录启动此模块；生产 kama-core 入口不使用它。
 from __future__ import annotations
 
-from kama_claude.core import runner
+from kama_claude.core import app, runner
 from kama_claude.core.app import run
 from kama_claude.core.events.bus import EventBus
 from kama_claude.core.llm.types import LlmResponse, ToolCallBlock
@@ -34,5 +34,6 @@ class OfflineProvider:
 
 
 if __name__ == "__main__":
+    app.AnthropicProvider = OfflineProvider  # type: ignore[misc,assignment]
     runner.AnthropicProvider = OfflineProvider  # type: ignore[misc,assignment]
     run()

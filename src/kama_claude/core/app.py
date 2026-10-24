@@ -32,6 +32,8 @@ from kama_claude.core.bus.commands import (
     PongResult,
     SessionCloseCommand,
     SessionCloseResult,
+    SessionCompactCommand,
+    SessionCompactResult,
     SessionCreateCommand,
     SessionCreateResult,
     SessionGetHistoryCommand,
@@ -42,6 +44,7 @@ from kama_claude.core.bus.commands import (
 from kama_claude.core.bus.envelope import EventPushEnvelope
 from kama_claude.core.config import KamaConfig, get_config
 from kama_claude.core.events.bus import EventBus
+from kama_claude.core.llm.provider import AnthropicProvider
 from kama_claude.core.logging_setup import setup_logging
 from kama_claude.core.permissions.manager import PermissionManager
 from kama_claude.core.permissions.storage import load_policy_file
@@ -227,6 +230,13 @@ class CoreApp:
         self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
         return PermissionRespondResult()
 
+    # 手动压缩 session thread，将摘要持久化写入 thread.jsonl
+    async def _session_compact_handler(self, params: dict[str, Any]) -> SessionCompactResult:
+        assert self._sessions is not None
+        cmd = SessionCompactCommand.model_validate(params)
+        result = await self._sessions.compact(cmd.session_id, cmd.focus)
+        return result  # type: ignore[no-any-return]
+
     # 关闭 session 并返回 closed 状态
     async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
         assert self._sessions is not None
@@ -328,6 +338,7 @@ class CoreApp:
         self._bus.subscribe(self._broadcaster.handle)
         sessions_root = Path("~/.kama/sessions").expanduser()
         store = SessionStore(sessions_root)
+        assert self._config is not None
         self._sessions = SessionManager(
             # lambda 是延迟调用的工厂；每条消息运行时才创建独立 Runner。
             store,
@@ -338,6 +349,8 @@ class CoreApp:
                 permission_manager=self._permission_manager,
             ),
             bus=self._bus,
+            # 延迟创建压缩 Provider，保持无凭据时 ping/离线 daemon 仍可启动。
+            provider_factory=lambda: AnthropicProvider(self._config.llm.default_model),  # type: ignore[union-attr]
         )
 
         server = SocketServer(
@@ -355,6 +368,7 @@ class CoreApp:
         server.register("session.get_history", self._session_history_handler)
         server.register("session.close", self._session_close_handler)
         server.register("permission.respond", self._permission_respond_handler)
+        server.register("session.compact", self._session_compact_handler)
 
         # 步骤 3：启动监听并记录服务信息。
         # await 等待监听启动完成；已有连接的处理由事件循环继续调度。

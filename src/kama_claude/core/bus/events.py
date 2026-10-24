@@ -143,6 +143,7 @@ class LlmUsageEvent(BaseModel):
     cache_read_input_tokens: int
     # 字段：本次写入缓存的输入 token 数。
     cache_creation_input_tokens: int
+    context_pct: float = 0.0
     ts: str
 
 
@@ -212,6 +213,16 @@ class SessionClosedEvent(BaseModel):
     ts: str
 
 
+# 自动压缩成功事件；手动压缩使用 RPC 结果回显。
+class ContextCompactedEvent(BaseModel):
+    type: Literal["context.compacted"] = "context.compacted"
+    session_id: str
+    run_id: str
+    original_tokens: int
+    summary_tokens: int
+    ts: str
+
+
 # 调用器在等待前发布；参数供客户端展示，session/run/id 用于追踪同一调用。
 class PermissionRequestedEvent(BaseModel):
     type: Literal["permission.requested"] = "permission.requested"
@@ -266,6 +277,7 @@ Event = Annotated[
     | SessionWaitingForInputEvent
     | SessionResumedEvent
     | SessionClosedEvent
+    | ContextCompactedEvent
     | PermissionRequestedEvent
     | PermissionGrantedEvent
     | PermissionDeniedEvent,

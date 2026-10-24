@@ -136,3 +136,14 @@ Permission waits clean up on cancellation/emitter errors; disconnect rejects
 existing pending approvals for sessions recorded on that connection, without
 cancelling the whole run. Shell cancellation reaps the direct child process.
 Offline tests isolate HOME/USERPROFILE and inherited KAMA/ANTHROPIC environment.
+
+## S6 learning branch
+
+See doc/STUDY_GUIDE_S6.md and doc/S6_VALIDATION.md. Runner loads global/project
+context plus session notes; Store applies L1 on history reads with fixed defaults.
+Auto L5 is disabled by default. Loop compacts after tool results when enabled;
+Runner uses compaction_count to persist the replaced history instead of slicing
+with the old prefill length. Manual session.compact shares the session lock,
+uses a lazily created provider, and returns RPC statistics (no compacted event).
+Offline daemon replaces both app and runner provider references. Keep S5 cleanup
+and Windows/UTF-8 fixes. Do not collect real-model test_run_e2e.py offline.

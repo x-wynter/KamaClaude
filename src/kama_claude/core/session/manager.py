@@ -25,6 +25,7 @@ from kama_claude.core.session.store import SessionStore
 
 if TYPE_CHECKING:
     # typing 的常量只在类型检查时为真，避免运行时循环导入 Runner 与 session 包。
+    from kama_claude.core.llm.base import LLMProvider
     from kama_claude.core.runner import AgentRunner
 
 SESSION_NOT_FOUND = -32010
@@ -41,16 +42,20 @@ def _now() -> str:
 # _locks 每个 session 一把 asyncio.Lock；同会话串行，不同会话仍可交替执行。
 # Callable[[], AgentRunner] 表示无参数工厂；保存函数，不是在初始化时创建 Runner。
 class SessionManager:
-    # 初始化会话管理器，接入文件存储、runner 工厂和事件总线
+    # 初始化会话管理器，接入文件存储、runner 工厂、事件总线和可选的 LLM provider（用于手动压缩）
     def __init__(
         self,
         store: SessionStore,
         runner_factory: Callable[[], AgentRunner],
         bus: EventBus,
+        provider: LLMProvider | None = None,
+        provider_factory: Callable[[], LLMProvider] | None = None,
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory
         self._bus = bus
+        self._provider = provider
+        self._provider_factory = provider_factory
         self._sessions: dict[str, Session] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -144,6 +149,44 @@ class SessionManager:
             session.updated_at = _now()
             self._store.write_meta(session)
             await self._bus.publish(SessionClosedEvent(session_id=sid, ts=session.updated_at))
+
+    # 输入 sid/focus，输出 token 统计；与 send_message 共用锁，忙时拒绝。
+    # await 期间持锁，取消自动释放且不写 thread；手动路径不发布自动压缩事件。
+    # 手动压缩指定 session 的 thread，将摘要持久化写入 thread.jsonl
+    async def compact(self, sid: str, focus: str = "") -> Any:
+        self._get_session(sid)
+        lock = self._locks[sid]
+        if lock.locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+        # 学习修复：首次使用才创建模型适配器，保持无凭据 daemon 可启动。
+        if self._provider is None and self._provider_factory is not None:
+            self._provider = self._provider_factory()
+        if self._provider is None:
+            raise HandlerError(-32020, "provider not available for compaction")
+        async with lock:
+            from kama_claude.core.bus.commands import SessionCompactResult
+            from kama_claude.core.compact.compactor import Compactor
+
+            messages = self._store.read_messages(sid)
+            session_dir = self._store.session_dir(sid)
+            compactor = Compactor(self._bus, session_dir, sid)
+            result = await compactor.compact_messages(messages, self._provider, focus=focus)
+            if result is None:
+                raise HandlerError(-32021, "compaction failed or not beneficial")
+            self._store.write_compacted(
+                sid,
+                [
+                    {"role": "user", "content": result.summary_text},
+                    {
+                        "role": "assistant",
+                        "content": "Understood, I'll continue from this summary.",
+                    },
+                ],
+            )
+            return SessionCompactResult(
+                summary_tokens=result.summary_tokens,
+                saved_tokens=max(0, result.original_token_estimate - result.summary_tokens),
+            )
 
     # 读取指定 session 的完整 thread 历史
     async def get_history(self, sid: str) -> list[dict[str, Any]]:

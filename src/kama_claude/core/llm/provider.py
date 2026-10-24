@@ -6,15 +6,35 @@
 # ── 依赖导入 ──
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from datetime import UTC, datetime
 from typing import Any
 
 import anthropic
+import httpx
 
 from kama_claude.core.bus.events import LlmModelSelectedEvent, LlmTokenEvent, LlmUsageEvent
 from kama_claude.core.events.bus import EventBus
 from kama_claude.core.llm.types import LlmResponse, ToolCallBlock, UsageStats
+
+_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-sonnet-4-6": 200_000,
+    "claude-haiku-4-5-20251001": 200_000,
+    "claude-opus-4-7": 200_000,
+}
+
+_MAX_STREAM_RETRIES = 3
+_RETRY_BACKOFF_S = (1.0, 2.0, 4.0)
+
+log = logging.getLogger(__name__)
+
+
+# 返回指定模型的最大 context window token 数
+def _context_window(model: str) -> int:
+    return _MODEL_CONTEXT_WINDOWS.get(model, 200_000)
+
 
 # 括号内相邻字符串由 Python 自动拼接，不会自动插入换行。
 # 这是系统提示，与 messages 中逐轮积累的对话内容分开传给 SDK。
@@ -56,6 +76,7 @@ class AnthropicProvider:
     # 用途：流式调用 Anthropic API，逐 token 发布事件并返回 LlmResponse
     # 输入：完整历史、工具说明、事件总线和任务 ID；工具说明不包含可执行函数。
     # 输出：完整响应交给 Loop；中途文本和最终用量通过 bus 发送给观察者。
+    # 流式调用 Anthropic API，逐 token 发布事件并返回 LlmResponse；网络中断时自动重试
     async def chat(
         self,
         messages: list[dict[str, object]],
@@ -98,7 +119,7 @@ class AnthropicProvider:
         # max_tokens 是本次请求的输出额度，和 AgentLoop 的 max_steps 含义不同。
         kwargs: dict[str, object] = {
             "model": self._model,
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "system": system_blocks,
             "messages": messages,
         }
@@ -109,19 +130,37 @@ class AnthropicProvider:
         # 步骤 4：建立文本片段列表并打开流式请求。
         # 保存流式片段，既用于实时发布，也用于流结束后拼成完整文本。
         text_parts: list[str] = []
+        final_message: Any = None
 
-        # **kwargs 把字典展开为关键字参数；异步上下文管理器负责流连接生命周期。
-        async with self._client.messages.stream(**kwargs) as stream:
-            # 步骤 5：逐段发布文本事件并累积完整文本。
-            # async for 等待流的下一块文本；事件虽名为 token，块未必是单个分词 token。
-            async for text in stream.text_stream:
-                await bus.publish(LlmTokenEvent(run_id=run_id, token=text, ts=_now()))
-                # append 不会丢弃片段里的空格；最终 join 按到达顺序原样拼接。
-                text_parts.append(text)
+        # 三次总尝试，只等待 1、2 秒；每次 async with 负责关闭该次流。
+        # 每次清空文本缓存，最终只返回成功尝试的完整响应。
+        for attempt in range(1, _MAX_STREAM_RETRIES + 1):
+            text_parts = []
+            try:
+                async with self._client.messages.stream(**kwargs) as stream:
+                    async for text in stream.text_stream:
+                        # 只广播首次片段以免重复；重试完整文本进入返回值，
+                        # TUI 的实时文本可能仍停留在首次尝试的残片。
+                        if attempt == 1:
+                            await bus.publish(LlmTokenEvent(run_id=run_id, token=text, ts=_now()))
+                        text_parts.append(text)
+                    final_message = await stream.get_final_message()
+                break  # success
+            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as exc:
+                if attempt == _MAX_STREAM_RETRIES:
+                    log.error(
+                        "stream failed after %d attempts run_id=%s step=%d: %s",
+                        _MAX_STREAM_RETRIES, run_id, step, exc,
+                    )
+                    raise
+                delay = _RETRY_BACKOFF_S[attempt - 1]
+                log.warning(
+                    "stream dropped (attempt %d/%d) run_id=%s step=%d: %s — retrying in %.0fs",
+                    attempt, _MAX_STREAM_RETRIES, run_id, step, exc, delay,
+                )
+                await asyncio.sleep(delay)
 
-            # 步骤 6：取得含工具调用和用量的完整 SDK 响应。
-            # 完整消息还包含工具调用和用量，不能只用已输出的文本代替。
-            final_message = await stream.get_final_message()
+        assert final_message is not None
 
         # 步骤 7：整理用量，发布统计事件。
         # 流结束后读取 SDK 返回的对象属性；这里不是从字典用 [] 取字段。
@@ -129,6 +168,8 @@ class AnthropicProvider:
         # getattr(obj, name, default) 读取可选属性；or 0 也将 None 归零。
         cache_read: int = getattr(usage, "cache_read_input_tokens", 0) or 0
         cache_create: int = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        # 官方比例未计入缓存读写 token，不能当作完整窗口占用率。
+        context_pct = usage.input_tokens / _context_window(self._model)
 
         await bus.publish(
             LlmUsageEvent(
@@ -137,6 +178,7 @@ class AnthropicProvider:
                 output_tokens=usage.output_tokens,
                 cache_read_input_tokens=cache_read,
                 cache_creation_input_tokens=cache_create,
+                context_pct=context_pct,
                 ts=_now(),
             )
         )
@@ -163,5 +205,6 @@ class AnthropicProvider:
                 output_tokens=usage.output_tokens,
                 cache_read_input_tokens=cache_read,
                 cache_creation_input_tokens=cache_create,
+                context_pct=context_pct,
             ),
         )

@@ -18,6 +18,8 @@ from kama_claude.core.bus.commands import (
     PongResult,
     SessionCloseCommand,
     SessionCloseResult,
+    SessionCompactCommand,
+    SessionCompactResult,
     SessionCreateCommand,
     SessionCreateResult,
     SessionGetHistoryCommand,
@@ -27,6 +29,7 @@ from kama_claude.core.bus.commands import (
 )
 from kama_claude.core.bus.envelope import EventPushEnvelope
 from kama_claude.core.bus.events import (
+    ContextCompactedEvent,
     CoreStartedEvent,
     LlmModelSelectedEvent,
     LlmTokenEvent,
@@ -194,6 +197,9 @@ def generate() -> str:
         "\n",
         _model_section("SessionGetHistoryResult", SessionGetHistoryResult),
         "\n",
+        _model_section("SessionCompactCommand", SessionCompactCommand),
+        _model_section("SessionCompactResult", SessionCompactResult),
+        _model_section("ContextCompactedEvent", ContextCompactedEvent),
         _model_section("SessionCloseCommand", SessionCloseCommand),
         "\n",
         _model_section("SessionCloseResult", SessionCloseResult),

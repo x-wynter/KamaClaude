@@ -21,10 +21,13 @@ class ExecutionContext:
     max_steps: int
     # Runner 从 Store 读取的完整历史；优先于单条 goal，防止重复插入本轮用户消息。
     prefill_messages: list[dict[str, Any]] = field(default_factory=list)
-    session_notes: str = ""  # 本轮开始时的笔记快照，system_prompt 读取它。
-    # default_factory 每次创建新列表，防止不同任务共享同一份消息历史。
+    session_notes: str = ""
+    global_context: str = ""
+    project_context: str = ""
     messages: list[dict[str, Any]] = field(default_factory=list)
     # 字段：已进入的模型请求轮数，由 Loop 递增。
+    # 摘要替换消息列表后，旧 prefill 长度失效；Runner 据此选择整体写回。
+    compaction_count: int = 0
     step: int = 0
     # 字段：当前任务状态：running、success 或 failed。
     status: str = "running"  # "running" | "success" | "failed"
@@ -41,17 +44,21 @@ class ExecutionContext:
         elif not self.messages:
             self.messages.append({"role": "user", "content": self.goal})
 
-    # 返回当前 run 的 system prompt，必要时注入 session notes
+    # 返回当前 run 的 system prompt，依次注入 global / project / session 三层记忆
     def system_prompt(self, base: str) -> str:
-        # base 是 Loop 传入的基本指令；有笔记才附加 Session Notes 与记笔记提示。
-        if not self.session_notes.strip():
-            return base
-        return (
-            base
-            + "\n\n## Session Notes\n"
-            + self.session_notes.strip()
-            + "\n\nRemember important durable facts by calling note_save."
-        )
+        # 固定拼接顺序不代表覆盖优先级；三层是 run 开始时的快照。
+        parts = [base]
+        if self.global_context.strip():
+            parts.append("\n\n## Global Context\n" + self.global_context.strip())
+        if self.project_context.strip():
+            parts.append("\n\n## Project Context\n" + self.project_context.strip())
+        if self.session_notes.strip():
+            parts.append(
+                "\n\n## Session Notes\n"
+                + self.session_notes.strip()
+                + "\n\nRemember important durable facts by calling note_save."
+            )
+        return "".join(parts)
 
     # ── 函数：add_assistant_message ──
     # 用途：将 LLM 响应的 content blocks 追加为 assistant 消息

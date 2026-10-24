@@ -525,6 +525,119 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 }
 ```
 
+### SessionCompactCommand
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `focus` | `string` | no |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "session.compact",
+      "default": "session.compact",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "focus": {
+      "default": "",
+      "title": "Focus",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "SessionCompactCommand",
+  "type": "object"
+}
+```
+### SessionCompactResult
+
+| Field | Type | Required |
+|---|---|---|
+| `summary_tokens` | `integer` | yes |
+| `saved_tokens` | `integer` | yes |
+
+```json
+{
+  "properties": {
+    "summary_tokens": {
+      "title": "Summary Tokens",
+      "type": "integer"
+    },
+    "saved_tokens": {
+      "title": "Saved Tokens",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "summary_tokens",
+    "saved_tokens"
+  ],
+  "title": "SessionCompactResult",
+  "type": "object"
+}
+```
+### ContextCompactedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `session_id` | `string` | yes |
+| `run_id` | `string` | yes |
+| `original_tokens` | `integer` | yes |
+| `summary_tokens` | `integer` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "context.compacted",
+      "default": "context.compacted",
+      "title": "Type",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "original_tokens": {
+      "title": "Original Tokens",
+      "type": "integer"
+    },
+    "summary_tokens": {
+      "title": "Summary Tokens",
+      "type": "integer"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "run_id",
+    "original_tokens",
+    "summary_tokens",
+    "ts"
+  ],
+  "title": "ContextCompactedEvent",
+  "type": "object"
+}
+```
 ### SessionCloseCommand
 
 | Field | Type | Required |
@@ -1250,6 +1363,7 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
 | `output_tokens` | `integer` | yes |
 | `cache_read_input_tokens` | `integer` | yes |
 | `cache_creation_input_tokens` | `integer` | yes |
+| `context_pct` | `number` | no |
 | `ts` | `string` | yes |
 
 ```json
@@ -1280,6 +1394,11 @@ Events written to `runs/<run_id>/events.jsonl` and forwarded over IPC to subscri
     "cache_creation_input_tokens": {
       "title": "Cache Creation Input Tokens",
       "type": "integer"
+    },
+    "context_pct": {
+      "default": 0.0,
+      "title": "Context Pct",
+      "type": "number"
     },
     "ts": {
       "title": "Ts",

@@ -1,4 +1,4 @@
-# ═══ 文件职责：终端内的多轮会话与事件与权限审批界面（S5） ═══
+# ═══ 文件职责：终端内的多轮会话、权限审批与上下文压缩界面（S6） ═══
 # 协作关系：Textual 管理输入/控件；SocketClient 提交会话消息并接收 Core 事件。
 # 阅读路线：先看界面字段与 compose，再看 on_mount/_socket_loop，最后看事件显示。
 # 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
@@ -414,6 +414,7 @@ class KamaTuiApp(App[None]):
         self._pending_permission_blocks: dict[str, PermissionBlock] = {}
         self._session_id: str | None = None
         self._busy = False
+        self._last_context_pct: float = 0.0
 
     # Textual 调用的生成器：yield 逐个交出子控件；不是一次性返回一个列表。
     def compose(self) -> ComposeResult:
@@ -473,6 +474,12 @@ class KamaTuiApp(App[None]):
         content = event.value.strip()
         if not content:
             return
+        # 检测 /compact 指令
+        if content == "/compact":
+            event.text_area.text = ""
+            if self._client is not None and self._session_id is not None and not self._busy:
+                self.run_worker(self._do_compact(), name="compact", exclusive=False)
+            return
         if self._client is None or self._session_id is None or self._busy:
             self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
             return
@@ -487,6 +494,28 @@ class KamaTuiApp(App[None]):
         self._update_header("running")
         # Textual worker 托管长 RPC，消息泵继续处理审批键盘，不能在此直接 await 整轮。
         self.run_worker(self._do_send_message(content), name="send_message", exclusive=False)
+
+    # worker 等 RPC 时消息泵仍运行；未设置 _busy，新输入可能收到服务端 busy。
+    # 在 worker 中执行手动压缩命令，完成后显示结果横幅
+    async def _do_compact(self) -> None:
+        if self._client is None or self._session_id is None:
+            return
+        self._append(Static("[dim]⚡ compacting context...[/dim]", classes="log-line"))
+        try:
+            result = await self._client.send_command(
+                "session.compact",
+                {"session_id": self._session_id, "focus": ""},
+            )
+            summary_tokens = result.get("summary_tokens", 0)
+            saved_tokens = result.get("saved_tokens", 0)
+            self._last_context_pct = 0.0
+            self._append(Static(
+                f"[bold cyan]⚡ Context compacted[/bold cyan]"
+                f"  [dim]summary={summary_tokens} tokens  saved≈{saved_tokens} tokens[/dim]",
+                classes="log-line",
+            ))
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))
 
     # 在 worker 中执行 IPC 发送，使 App 消息泵在 agent 运行期间仍能处理键盘/焦点等消息
     async def _do_send_message(self, content: str) -> None:
@@ -559,6 +588,20 @@ class KamaTuiApp(App[None]):
         except Exception:
             return None
 
+    # 显示 llm.usage 估算值；压缩后清零只是界面状态，不代表上下文为空。
+    # 生成 context 占用率的彩色进度条字符串
+    def _render_ctx_bar(self, pct: float) -> str:
+        filled = int(pct * 20)
+        bar = "█" * filled + "░" * (20 - filled)
+        label = f"ctx:{pct * 100:.1f}%"
+        if pct >= 0.85:
+            color = "bold red"
+        elif pct >= 0.70:
+            color = "yellow"
+        else:
+            color = "dim"
+        return f"[{color}]{label} {bar}[/{color}]"
+
     # 根据连接和运行状态刷新顶部标题
     def _update_header(self, state: str) -> None:
         try:
@@ -627,6 +670,7 @@ class KamaTuiApp(App[None]):
                         "llm.usage",
                         "log.*",
                         "permission.*",
+                        "context.*",
                     ],
                     "scope": "global",
                 }
@@ -775,15 +819,27 @@ class KamaTuiApp(App[None]):
                 )
 
         elif t == "llm.usage":
-            self._append(
-                Static(
-                    f"[dim]  tokens  "
-                    f"in={event.get('input_tokens')} "
-                    f"out={event.get('output_tokens')} "
-                    f"cache={event.get('cache_read_input_tokens')}[/dim]",
-                    classes="usage",
-                )
-            )
+            pct = float(event.get("context_pct") or 0.0)
+            self._last_context_pct = pct
+            ctx_bar = self._render_ctx_bar(pct)
+            self._append(Static(
+                f"[dim]  tokens  "
+                f"in={event.get('input_tokens')} "
+                f"out={event.get('output_tokens')} "
+                f"cache={event.get('cache_read_input_tokens')}[/dim]"
+                f"  {ctx_bar}",
+                classes="usage",
+            ))
+
+        elif t == "context.compacted":
+            orig = event.get("original_tokens", 0)
+            summary = event.get("summary_tokens", 0)
+            self._last_context_pct = 0.0
+            self._append(Static(
+                f"[bold cyan]⚡ Context compacted[/bold cyan]"
+                f"  [dim]original≈{orig} tokens → summary={summary} tokens[/dim]",
+                classes="log-line",
+            ))
 
         elif t == "permission.requested":
             tool_use_id = str(event.get("tool_use_id", ""))

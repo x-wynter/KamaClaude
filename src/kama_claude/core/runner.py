@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kama_claude.core.bus.events import RunFinishedEvent, RunStartedEvent
+from kama_claude.core.compact.compactor import Compactor
 from kama_claude.core.config import KamaConfig
 from kama_claude.core.context import ExecutionContext
 from kama_claude.core.events.bus import EventBus, EventHandler
@@ -20,6 +21,7 @@ from kama_claude.core.events.writer import EventWriter
 from kama_claude.core.llm.base import LLMProvider
 from kama_claude.core.llm.provider import AnthropicProvider
 from kama_claude.core.loop import AgentLoop
+from kama_claude.core.memory.loader import load_context_file
 from kama_claude.core.permissions.manager import PermissionManager
 from kama_claude.core.runs import RUNS_DIR, new_run_id
 from kama_claude.core.session.model import Session
@@ -64,7 +66,7 @@ class RunOutcome:
 #   _extra_handlers：附加事件回调；_runs_dir：运行记录根目录；_trace：可选共享 trace。
 class AgentRunner:
     # ── 初始化：__init__ ──
-    # 用途：保存配置和可选依赖；实际组装和执行发生在 run 中。
+    # 用途：保存依赖；实际组装发生在 run_and_capture，run 仅是包装。
     def __init__(
         self,
         config: KamaConfig,
@@ -77,7 +79,7 @@ class AgentRunner:
         trace: TraceWriter | None = None,
         permission_manager: PermissionManager | None = None,
     ) -> None:
-        # 这里只保存依赖，不启动模型请求；真正执行入口是下面的 run。
+        # 这里只保存依赖，不启动模型请求；运行主线入口是 run_and_capture。
         # self._config 的下划线表示内部属性约定，不是 Python 强制私有。
         self._config = config
         self._bus = bus
@@ -140,6 +142,10 @@ class AgentRunner:
             notes = ""
         run_path.mkdir(parents=True, exist_ok=True)
 
+        # 全局来自用户目录，项目来自 daemon cwd；session notes 已由 Store 读取。
+        global_ctx = load_context_file(Path("~/.kama/context.md").expanduser())
+        project_ctx = load_context_file(Path(".kama/context.md"))
+
         task_manager = TaskManager(run_path / ".tasks")
 
         # 步骤 2：选取事件总线并添加附加回调。
@@ -157,6 +163,8 @@ class AgentRunner:
             max_steps=self._config.agent.max_steps,
             prefill_messages=history,
             session_notes=notes,
+            global_context=global_ctx,
+            project_context=project_ctx,
         )
         prefill_len = len(history)
         # 保存前缀长度，结束后只把本轮新增的 assistant/tool_result 追加回 thread。
@@ -189,10 +197,22 @@ class AgentRunner:
                         self._trace,
                         include_payload=self._config.trace.include_llm_payload,
                     )
+                session_dir = (
+                    store.session_dir(session.id)
+                    if session is not None and store is not None
+                    else run_path
+                )
+                session_id_str = session.id if session is not None else ""
+                # 每个 run 独立压缩器；配置默认阈值 0，因此自动摘要默认关闭。
+                compactor = Compactor(bus, session_dir, session_id_str)
                 loop = AgentLoop(
-                    provider, registry, bus,
+                    provider,
+                    registry,
+                    bus,
                     permission_manager=self._permission_manager,
-                    session_id=session.id if session is not None else "",
+                    compactor=compactor,
+                    compact_threshold=self._config.compaction.auto_threshold,
+                    session_id=session_id_str,
                 )
                 await loop.run(context)
             # 先记录取消状态并发布 run.finished，再向上重新抛出取消异常。
@@ -221,7 +241,11 @@ class AgentRunner:
 
         if session is not None and store is not None:
             # 步骤 8：事件文件先关闭，再保存本轮模型消息；两种文件的内容不同。
-            store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
+            # 摘要已替换历史前缀，不能再按旧长度切片；备份并整体保存。
+            if context.compaction_count:
+                store.write_compacted(session.id, context.messages)
+            else:
+                store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
 
         # 步骤 9：把取消异常继续交给上层。
         # 保留取消语义，不能把取消悄悄当作正常返回。
