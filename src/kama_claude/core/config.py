@@ -80,7 +80,7 @@ class PermissionConfig:
 
 
 @dataclass
-# 阈值接入 Loop；L1 长度字段目前仅解析，Store 仍使用函数默认值。
+# 阈值接入 Loop；工具结果截断长度字段目前仅解析，Store 仍使用函数默认值。
 class CompactionConfig:
     # 0 禁用自动压缩；非零时由 Loop 比较 context_pct。
     auto_threshold: float = 0.0

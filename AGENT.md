@@ -140,8 +140,8 @@ Offline tests isolate HOME/USERPROFILE and inherited KAMA/ANTHROPIC environment.
 ## S6 learning branch
 
 See doc/STUDY_GUIDE_S6.md and doc/S6_VALIDATION.md. Runner loads global/project
-context plus session notes; Store applies L1 on history reads with fixed defaults.
-Auto L5 is disabled by default. Loop compacts after tool results when enabled;
+context plus session notes; Store truncates long tool results on history reads with fixed defaults.
+Automatic history summarization is disabled by default. Loop compacts after tool results when enabled;
 Runner uses compaction_count to persist the replaced history instead of slicing
 with the old prefill length. Manual session.compact shares the session lock,
 uses a lazily created provider, and returns RPC statistics (no compacted event).

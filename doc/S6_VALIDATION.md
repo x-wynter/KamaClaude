@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | .gitignore、.kama/context.md | 2、3 | 第 4 节项目记忆与 workspace 提示，workspace/ 被忽略 |
 | core/memory/__init__.py、loader.py、context.py | 2、3 | 第 2、4 节，包导出与主线导入区别 |
-| core/compact/__init__.py、budget.py、session/store.py | 4、7、8 | 第 4、6 节，L1 与 thread 备份 |
+| core/compact/__init__.py、budget.py、session/store.py | 4、7、8 | 第 4、6 节，工具结果截断与 thread 备份 |
 | core/compact/compactor.py | 5、6、7、8、12 | 第 3、4、6 节，自动/手动分流 |
 | core/config.py | 6、13 | 第 5 节所有新增配置及接线情况 |
 | core/app.py、runner.py、session/manager.py | 1、6、7、8、12 | 第 2、3、6 节，装配与锁、收尾 |
@@ -35,7 +35,7 @@
 - events：保留 ContextCompactedEvent 和原权限注释；context：采用三层拼接替代单层旧实现。
 - config：接入 compaction 小节；官方 perm_timeout_val 已替代原学习分支 permission_seconds 的同类类型修复，不重复实现。
 - provider/loop：采用官方流重试、max_tokens 配对和自动摘要分支，保留原模型/事件教学注释并按实际行为修订。
-- store：沿用 UTF-8、配对裁剪后接入 L1；manager 保留原会话锁、运行与清理逻辑并加入 compact。
+- store：沿用 UTF-8、配对裁剪后接入工具结果截断；manager 保留原会话锁、运行与清理逻辑并加入 compact。
 - TUI：加入用量条和压缩 worker；保留旧 resolved_block 局部变量避免已有类型复用问题。
 
 继承的实际修复仍涉及 cli/core、cli/trace、core/app、permissions/manager、task/manager、tools/builtin/bash、trace/provider、trace/writer、transport/socket_server、tui/app：Windows 信号/PID/无窗口启动、UTF-8/旧日志解码、取消等待、审批 Future 清理、断连拒绝、子进程回收及请求任务管理。
@@ -87,6 +87,6 @@ git diff --check
 
 ## 6. 已知限制与提交
 
-未验证真实模型、真实网络中断或真实凭据环境。默认自动摘要关闭；L1 两个长度配置尚未接入 Store；context_pct 未计缓存 token；重试后实时 UI 可能仅留首次残片；摘要非空即可接受；thread 替换非原子事务。这些官方边界在指南对应章节说明，没有借学习注释虚构功能或进行额外重构。
+未验证真实模型、真实网络中断或真实凭据环境。默认自动摘要关闭；工具结果截断的两个长度配置尚未接入 Store；context_pct 未计缓存 token；重试后实时 UI 可能仅留首次残片；摘要非空即可接受；thread 替换非原子事务。这些官方边界在指南对应章节说明，没有借学习注释虚构功能或进行额外重构。
 
 本次以合并提交保存：父提交为 study/s5 的 `0e59919` 与官方 S6 的 `f4567c1`，提交题为 `feat(study): complete S6 learning merge and offline validation`。记录位于提交内部，避免嵌入自身哈希；用 `git log -1 --format='%H %P %s'` 可查询准确提交与双父。最终停留 study/s6，不推送。

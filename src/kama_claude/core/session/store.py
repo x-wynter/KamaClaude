@@ -112,7 +112,7 @@ class SessionStore:
                 continue
             messages.append({"role": role, "content": row.get("content", "")})
 
-        # 先配对裁剪再 L1；只改变读取结果，不写磁盘原文。
+        # 先配对裁剪再截断超长工具结果；只改变读取结果，不写磁盘原文。
         messages = self._trim_orphan_tool_use(messages)
         from kama_claude.core.compact.budget import truncate_tool_results
 

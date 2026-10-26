@@ -1,4 +1,4 @@
-# ═══ 文件职责：L5 通过模型生成对话交接摘要 ═══
+# ═══ 文件职责：通过模型生成对话交接摘要 ═══
 # 自动链：Loop → compact → compact_messages；手动链：Manager → compact_messages。
 # 推荐阅读：CompactionResult → compact_messages → compact → 文本转换，不代表调用顺序。
 # 手动路径由 Store 写 thread；自动路径改 Context、写 summary 文件并发布压缩事件。

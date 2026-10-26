@@ -11,8 +11,8 @@ S5 解决工具能否安全执行的问题；S6 处理长对话的上下文负�
 | 1 | S6 增加在哪些执行边界？ | Runner 加载记忆并装配 Compactor；Store 读取时截断；Loop 可自动摘要；Core 增加手动压缩 RPC；Provider 增加流重试。 | [runner.py](../src/kama_claude/core/runner.py)：run_and_capture；[app.py](../src/kama_claude/core/app.py)：CoreApp.run |
 | 2 | 三层记忆从哪里来，何时生效？ | Global 是用户目录的 .kama/context.md，Project 是 daemon 工作目录的 .kama/context.md，Session 是 notes.md；每个 run 开始读为快照。 | [loader.py](../src/kama_claude/core/memory/loader.py)：load_context_file；[runner.py](../src/kama_claude/core/runner.py)：global_ctx/project_ctx/notes |
 | 3 | 记忆如何进入模型输入？ | ExecutionContext 增加 global_context/project_context；system_prompt 按 base→Global→Project→Session 拼接非空文本，和 messages 分开传入 Provider。 | [context.py](../src/kama_claude/core/context.py)：ExecutionContext.system_prompt |
-| 4 | L1 如何缩短工具输出？ | read_messages 先裁剪孤儿工具调用，再将超过 8000 字符的字符串 tool_result 保留前 4000 字符及提示；返回新列表，不改原 thread。 | [store.py](../src/kama_claude/core/session/store.py)：read_messages；[budget.py](../src/kama_claude/core/compact/budget.py)：truncate_tool_results |
-| 5 | L5 摘要怎样产生，返回什么？ | 把对话转成纯文本，要求六节交接摘要，以无工具、独立总线请求模型；返回 CompactionResult，普通模型异常或空摘要返回 None。 | [compactor.py](../src/kama_claude/core/compact/compactor.py)：compact_messages、_messages_to_text、CompactionResult |
+| 4 | 工具结果截断如何缩短历史中的工具输出？ | read_messages 先裁剪孤儿工具调用，再将超过 8000 字符的字符串 tool_result 保留前 4000 字符及提示；返回新列表，不改原 thread。 | [store.py](../src/kama_claude/core/session/store.py)：read_messages；[budget.py](../src/kama_claude/core/compact/budget.py)：truncate_tool_results |
+| 5 | 历史摘要怎样产生，返回什么？ | 把对话转成纯文本，要求六节交接摘要，以无工具、独立总线请求模型；返回 CompactionResult，普通模型异常或空摘要返回 None。 | [compactor.py](../src/kama_claude/core/compact/compactor.py)：compact_messages、_messages_to_text、CompactionResult |
 | 6 | 自动摘要何时触发？ | 工具结果全部回填后，run 未结束、stop_reason 为 tool_use、存在压缩器、阈值大于 0 且 usage.context_pct 达标才触发。配置默认 0。 | [loop.py](../src/kama_claude/core/loop.py)：AgentLoop.run；[config.py](../src/kama_claude/core/config.py)：CompactionConfig |
 | 7 | 自动摘要改变哪些状态，怎样跨轮保留？ | compact 将 Context.messages 替换成 user 摘要和 assistant 确认，写摘要副本并发事件；学习分支用 compaction_count 告知 Runner 整体写回，避免旧 prefill 偏移丢消息。 | [compactor.py](../src/kama_claude/core/compact/compactor.py)：compact；[context.py](../src/kama_claude/core/context.py)：compaction_count；[runner.py](../src/kama_claude/core/runner.py)：收尾写回 |
 | 8 | 手动 /compact 的完整路径是什么？ | TUI worker→session.compact→SessionManager.compact→compact_messages→write_compacted；与发送消息共用会话锁，成功返回摘要和节省 token 数。 | [tui/app.py](../src/kama_claude/tui/app.py)：_do_compact；[manager.py](../src/kama_claude/core/session/manager.py)：compact；[store.py](../src/kama_claude/core/session/store.py)：write_compacted |
@@ -20,7 +20,7 @@ S5 解决工具能否安全执行的问题；S6 处理长对话的上下文负�
 | 10 | 流重试与 S5 工具重试有何区别？ | Provider 对 RemoteProtocolError/ReadError/ConnectError 最多总尝试三次，间隔 1、2 秒；重建文本缓存，只有第一次广播 token。它重新请求模型，不重新执行已完成工具。 | [provider.py](../src/kama_claude/core/llm/provider.py)：AnthropicProvider.chat、_MAX_STREAM_RETRIES |
 | 11 | max_tokens 为什么需要专门处理？ | 输出额度由 4096 改为 8192；若响应因上限结束且含工具调用，Loop 不执行不完整参数，而是补同 ID 的错误结果，避免下一次请求出现孤儿 tool_use。 | [provider.py](../src/kama_claude/core/llm/provider.py)：kwargs；[loop.py](../src/kama_claude/core/loop.py)：max_tokens 分支 |
 | 12 | 压缩失败或取消如何收尾？ | 模型失败/空摘要保持原历史；手动路径报 RPC 错误；取消传播并释放会话锁。流由 async with 关闭，Runner 延续 S5 取消收尾。摘要副本写失败只记日志。 | [compactor.py](../src/kama_claude/core/compact/compactor.py)：异常处理；[manager.py](../src/kama_claude/core/session/manager.py)：compact；[runner.py](../src/kama_claude/core/runner.py)：cancelled |
-| 13 | 配置与验证新增什么？ | 新增 compaction 配置和三个环境变量；auto_threshold 已接入，两个 L1 长度字段尚未接线。离线测试覆盖新模块、持久化、重试和真实 TUI/TCP 压缩后续聊。 | [config.py](../src/kama_claude/core/config.py)：_apply_toml/_apply_env；[S6 回归](../tests/unit/test_s6_regressions.py)；[TUI 闭环](../tests/integration/test_s6_tui_offline.py) |
+| 13 | 配置与验证新增什么？ | 新增 compaction 配置和三个环境变量；auto_threshold 已接入，两个工具结果截断长度字段尚未接线。离线测试覆盖新模块、持久化、重试和真实 TUI/TCP 压缩后续聊。 | [config.py](../src/kama_claude/core/config.py)：_apply_toml/_apply_env；[S6 回归](../tests/unit/test_s6_regressions.py)；[TUI 闭环](../tests/integration/test_s6_tui_offline.py) |
 
 ## 2. 对象、生命周期与推荐阅读顺序
 
@@ -29,7 +29,7 @@ S5 解决工具能否安全执行的问题；S6 处理长对话的上下文负�
 | CoreApp / SessionManager | daemon 启动创建，所有会话共享 Manager | 注册 session.compact；保存手动摘要 Provider 和每会话锁 |
 | AgentRunner / ExecutionContext | 每条用户消息创建一次 | 加载三层快照、读历史、装配模型与压缩器、保存结果 |
 | Compactor | 自动路径每 run 一份；手动路径每次调用一份 | 总结历史；自动路径另更新 Context、写 summary、发事件 |
-| SessionStore | Core 创建并注入 Manager/Runner | UTF-8 历史读取、L1、追加或备份替换 |
+| SessionStore | Core 创建并注入 Manager/Runner | UTF-8 历史读取、工具结果截断、追加或备份替换 |
 | AnthropicProvider | Runner 按 run 创建；手动实例由 Manager 首次使用时创建并复用 | 流请求、有限重试、用量估算 |
 
 推荐阅读顺序：`context.py` 的字段与 system_prompt → `memory/loader.py` → `compact/budget.py` → `compact/compactor.py` 的结果类型和 compact_messages → `loop.py` → `runner.py` → `session/manager.py` → `app.py` → `tui/app.py`。这是理解顺序，真实调用从客户端进入 Core。
@@ -66,9 +66,9 @@ flowchart TD
 
 **三层记忆**属于 system 文本。全局和项目 context.md 没有自动写入接口；notes.md 仍由 S4 的 note_save 追加，下一 run 才重新加载。拼接顺序不实现优先级覆盖、冲突消解或语义检索。项目路径基于 daemon cwd，而不是客户端窗口目录。官方新增的 [.kama/context.md](../.kama/context.md) 是发送给被运行 Agent 的项目提示示例；其中 workspace 文件约定没有变成路径沙箱，不能替代 S5 权限判断。
 
-**L1**只针对读取到的 user 消息中的字符串 tool_result，超限才截断；嵌套列表等其他内容不会压缩。原 thread 不变，读取后的消息列表变短。同一 run 新产生的大输出在该 run 中不会再次经过 read_messages，因此不是“每次模型调用前都控制预算”。保留的提示称完整输出在 run events；它只保留提示，不校验相应事件文件是否仍存在。
+**工具结果截断**只针对读取到的 user 消息中的字符串 tool_result，超限才截断；嵌套列表等其他内容不会压缩。原 thread 不变，读取后的消息列表变短。同一 run 新产生的大输出在该 run 中不会再次经过 read_messages，因此不是“每次模型调用前都控制预算”。保留的提示称完整输出在 run events；它只保留提示，不校验相应事件文件是否仍存在。
 
-**L5**把文字、tool_use、tool_result 转为带角色标记的文本，要求 Original Goal、Completed Steps、Key Constraints & Discoveries、Current File State、Remaining TODOs、Critical Data 六节。`focus` 追加到摘要指令。无检索或多级摘要调度，也没有实现名为 L2/L3/L4 的步骤。摘要请求使用专用 system，不把三层记忆单独注入摘要请求；自动压缩后 Context 的三层字段仍保留，下一步正常模型请求继续使用。
+**历史摘要压缩**把文字、tool_use、tool_result 转为带角色标记的文本，要求 Original Goal、Completed Steps、Key Constraints & Discoveries、Current File State、Remaining TODOs、Critical Data 六节。`focus` 追加到摘要指令。该实现不包含检索或多级摘要调度。摘要请求使用专用 system，不把三层记忆单独注入摘要请求；自动压缩后 Context 的三层字段仍保留，下一步正常模型请求继续使用。
 
 | 路径 | 内存 | 文件 | 反馈 |
 | --- | --- | --- | --- |
