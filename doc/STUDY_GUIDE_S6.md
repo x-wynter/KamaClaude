@@ -123,7 +123,7 @@ git diff --check
 
 ## 8. 学习问答与系统不足记录
 
-本节按主题合并重复追问，记录第 1 节的 **13 个核心问题、24 个对话追问和 10 项系统不足**；末尾保留原有 8 个自测题。结论对应当前 study/s6 源码。改进建议不代表已经实现。
+本节按主题合并重复追问，记录第 1 节的 **13 个核心问题、25 个对话追问和 10 项系统不足**；末尾保留原有 8 个自测题。结论对应当前 study/s6 源码。改进建议不代表已经实现。
 
 ### 8.1 核心问题与结论（13 项）
 
@@ -145,7 +145,7 @@ git diff --check
 
 源码入口：[Runner](../src/kama_claude/core/runner.py)、[Context](../src/kama_claude/core/context.py)、[Store](../src/kama_claude/core/session/store.py)、[Loop](../src/kama_claude/core/loop.py)、[Compactor](../src/kama_claude/core/compact/compactor.py)、[Provider](../src/kama_claude/core/llm/provider.py)、[Manager](../src/kama_claude/core/session/manager.py)、[TUI](../src/kama_claude/tui/app.py)。第 1 节保留逐题源码链接。
 
-### 8.2 对话追问与结论（24 项）
+### 8.2 对话追问与结论（25 项）
 
 | 编号 | 追问 | 简要结论 |
 | --- | --- | --- |
@@ -173,6 +173,7 @@ git diff --check
 | 22 | 会话状态何时更新，释放锁会更新吗？ | 创建时 active；Runner 正常返回后，chat 设为 waiting_for_input，one_shot 设为 closed；显式 close 也会更新。释放锁不改状态，取消可跳过完成更新。 |
 | 23 | 正式历史写失败，如何保证下一 run 正确？ | 当前不能保证。应停止续聊、核对文件和本轮记录后恢复；原子写入和保存失败后阻止续聊是待实现建议，备份也未必含本轮进展。 |
 | 24 | 测试通过是否说明这些问题已解决？ | 否。交付记录为离线 283 passed，未验证真实模型质量；正式历史写失败恢复等问题仍存在，本次问答整理没有重新运行测试。 |
+| 25 | 为什么手动压缩不写摘要副本，自动压缩却写？ | 自动路径调用 compact()，额外写 summary_<时间戳>.md；手动路径只调用 compact_messages()，随后直接写 thread.jsonl，没有调用副本写入方法。副本便于查看自动压缩的中间结果，但源码未说明作者为何这样区分，不能把这个作用当作确定的设计动机。两条路径都会备份并重写 thread：手动在摘要成功后立即保存，自动在 run 收尾保存。下一 run 只读取 thread，不读取摘要副本。 |
 
 补充两点：note_save 写盘后，本轮 system 不会自动重读，但模型可从本轮工具调用中看到保存的内容；续聊开始时源码未将 session.status 改回 active，是否忙实际由会话锁判断。取消不会自动撤销已经发生的工具操作或摘要替换。
 

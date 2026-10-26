@@ -1,5 +1,5 @@
-# 行为规范
+# Project Context
 
-## 创建文件准则
+- Tests live in KamaClaude/tests/
 
-需要创建文件时，所有的文件都需要在 ./workspace 下创建。
+- Prefer focused unit tests.
