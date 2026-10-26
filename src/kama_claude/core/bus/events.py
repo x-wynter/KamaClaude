@@ -255,6 +255,33 @@ class PermissionDeniedEvent(BaseModel):
     ts: str
 
 
+# 主线事件：子 run 开始；parent_run_id 关联父任务，不代表新建了 session。
+class SubagentStartedEvent(BaseModel):
+    type: Literal["subagent.started"] = "subagent.started"
+    run_id: str          # 子 agent run_id
+    parent_run_id: str
+    description: str
+    ts: str
+
+
+# 只反馈状态，不携带最终文本；文本经工具返回或 agent_result 查询。
+class SubagentFinishedEvent(BaseModel):
+    type: Literal["subagent.finished"] = "subagent.finished"
+    run_id: str
+    parent_run_id: str
+    status: str          # "success" | "failed"
+    ts: str
+
+
+# Manager 成功解析 Skill 后发布；发生在根 Runner 开始前，不能据此证明运行成功。
+class SkillInvokedEvent(BaseModel):
+    type: Literal["skill.invoked"] = "skill.invoked"
+    skill_name: str
+    arguments: str
+    run_id: str
+    ts: str
+
+
 # 根据 type 字段决定事件类型的判别联合
 # Annotated 附加按 type 判别的元数据；S1 已有多种事件，解析时按 type 选择具体模型。
 # A | B 表示可以是 A 或 B；Annotated 在类型之外附加 Pydantic 的判别规则。
@@ -280,6 +307,9 @@ Event = Annotated[
     | ContextCompactedEvent
     | PermissionRequestedEvent
     | PermissionGrantedEvent
-    | PermissionDeniedEvent,
+    | PermissionDeniedEvent
+    | SubagentStartedEvent
+    | SubagentFinishedEvent
+    | SkillInvokedEvent,
     Discriminator("type"),
 ]

@@ -638,6 +638,144 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
   "type": "object"
 }
 ```
+### SubagentFinishedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `parent_run_id` | `string` | yes |
+| `status` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "subagent.finished",
+      "default": "subagent.finished",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "parent_run_id": {
+      "title": "Parent Run Id",
+      "type": "string"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "parent_run_id",
+    "status",
+    "ts"
+  ],
+  "title": "SubagentFinishedEvent",
+  "type": "object"
+}
+```
+### SubagentStartedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `run_id` | `string` | yes |
+| `parent_run_id` | `string` | yes |
+| `description` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "subagent.started",
+      "default": "subagent.started",
+      "title": "Type",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "parent_run_id": {
+      "title": "Parent Run Id",
+      "type": "string"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "parent_run_id",
+    "description",
+    "ts"
+  ],
+  "title": "SubagentStartedEvent",
+  "type": "object"
+}
+```
+### SkillInvokedEvent
+
+| Field | Type | Required |
+|---|---|---|
+| `type` | `string` | no |
+| `skill_name` | `string` | yes |
+| `arguments` | `string` | yes |
+| `run_id` | `string` | yes |
+| `ts` | `string` | yes |
+
+```json
+{
+  "properties": {
+    "type": {
+      "const": "skill.invoked",
+      "default": "skill.invoked",
+      "title": "Type",
+      "type": "string"
+    },
+    "skill_name": {
+      "title": "Skill Name",
+      "type": "string"
+    },
+    "arguments": {
+      "title": "Arguments",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "ts": {
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "skill_name",
+    "arguments",
+    "run_id",
+    "ts"
+  ],
+  "title": "SkillInvokedEvent",
+  "type": "object"
+}
+```
 ### SessionCloseCommand
 
 | Field | Type | Required |

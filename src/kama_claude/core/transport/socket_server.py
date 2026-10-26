@@ -53,7 +53,7 @@ def _now() -> str:
 def get_connection_writer() -> asyncio.StreamWriter:
     return _writer_var.get()
 
-_MAX_LINE_BYTES = 1 * 1024 * 1024  # 1 MB per frame
+_MAX_LINE_BYTES = 64 * 1024 * 1024  # 64 MB per frame，兼容 MCP 大文件工具结果
 
 
 # ── 类：SocketServer ──
@@ -82,6 +82,7 @@ class SocketServer:
         self._trace = trace
         self._on_disconnect = on_disconnect
         self._requests: set[asyncio.Task[None]] = set()
+        self._active_writers: set[asyncio.StreamWriter] = set()
 
     # ── 函数：register ──
     # 用途：注册一个方法名对应的命令处理函数
@@ -122,12 +123,14 @@ class SocketServer:
     async def stop(self) -> None:
         if self._server is None:
             return
-        # 停止监听，不再接受新连接；这里没有维护和逐个关闭已有客户端的连接列表。
+        # 学习分支保留请求取消/等待，再合入官方活跃 writer 关闭，审批请求不会遗留。
         pending = list(self._requests)
         for task in pending:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+        for writer in list(self._active_writers):
+            writer.close()
         self._server.close()
         # wait_for 限制等待关闭的时长；超过 2 秒会抛出 TimeoutError。
         await asyncio.wait_for(self._server.wait_closed(), timeout=2.0)
@@ -145,6 +148,7 @@ class SocketServer:
         logger.debug("client connected: %s", peer)
 
         # 步骤 2：处理此连接上的请求流。
+        self._active_writers.add(writer)
         try:
             await self._read_loop(reader, writer)
 
@@ -153,12 +157,12 @@ class SocketServer:
         finally:
             if self._on_disconnect is not None:
                 self._on_disconnect(writer)
+            self._active_writers.discard(writer)
             if self._broadcaster is not None:
                 self._broadcaster.unsubscribe(writer)
-            writer.close()
             try:
-                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
-            except (TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
+                writer.close()
+            except Exception:
                 pass
             logger.debug("client disconnected: %s", peer)
 

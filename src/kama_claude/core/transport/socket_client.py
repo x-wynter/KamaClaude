@@ -18,7 +18,7 @@ from kama_claude.core.bus.envelope import JsonRpcRequest
 # 跨进程传输后得到普通 dict，不再是服务端内存中的 Pydantic 实例。
 type EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
-_MAX_LINE_BYTES = 1 * 1024 * 1024  # 1 MB per frame
+_MAX_LINE_BYTES = 64 * 1024 * 1024  # 64 MB per frame，兼容 MCP 大文件工具结果
 
 
 # ── 类：IpcError ──
@@ -119,6 +119,9 @@ class SocketClient:
                     line = await self._reader.readline()
                 except (ConnectionResetError, OSError):
                     break
+                except (ValueError, asyncio.LimitOverrunError):
+                    # 单行超出 limit；丢弃本行，继续读取后续消息
+                    continue
                 # readline 按换行分帧；b"" 表示对端关闭，而非一条空事件。
                 if not line:
                     break

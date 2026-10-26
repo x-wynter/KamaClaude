@@ -49,3 +49,6 @@ class LlmResponse:
     text: str = ""
     # | None 表示可以没有用量对象，测试中的简化响应通常省略此字段。
     usage: UsageStats | None = None
+    # thinking blocks from extended thinking — must be preserved verbatim in conversation history
+    # 保存适配器返回的 thinking/signature，Loop 用于后续请求与会话历史。
+    thinking_blocks: list[dict[str, object]] = field(default_factory=list)

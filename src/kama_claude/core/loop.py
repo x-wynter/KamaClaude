@@ -1,6 +1,7 @@
 # ═══ 文件职责：Agent 的逐轮执行逻辑 ═══
-# 协作关系：Runner → AgentLoop → Provider / invoke_tool；ExecutionContext 保存每轮更新的状态。
-# 阅读路线：先看 run 的六个步骤；每轮对应一次模型请求，工具调用可能有多次。
+# 协作关系：Runner 或 SpawnAgentTool → AgentLoop → Provider / invoke_tool。
+# ExecutionContext 保存每轮更新的状态。
+# 阅读路线：先看 run 的六个步骤；每轮调用一次 chat，内部可能重试；工具调用可能有多次。
 # 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
 
 # ── 依赖导入 ──
@@ -104,7 +105,8 @@ class AgentLoop:
 
             # 步骤 3：把模型文本和工具请求追加到历史。
             # 一条 assistant 消息可含文本和多个 tool_use 块，供下次模型请求使用。
-            blocks: list[dict[str, object]] = []
+            # thinking/signature 原样放在 assistant 块最前；不是重新启用或重算模型思考。
+            blocks: list[dict[str, object]] = list(response.thinking_blocks)
             if response.text:
                 blocks.append({"type": "text", "text": response.text})
             # tc 是 ToolCallBlock 实例；点号读取字段，再转成供应商消息格式的字典。

@@ -21,6 +21,9 @@ async def test_tui_compact_and_continue(running_daemon: subprocess.Popen[bytes],
         await _wait(lambda: not app._busy)
         root = tmp_path / ".kama" / "sessions" / str(app._session_id)
         editor.text = "/compact"
+        # S7 自动补全先消费 Enter；Esc 收起候选后才提交精确命令。
+        await pilot.pause()
+        await pilot.press("escape")
         await pilot.press("enter")
         await _wait(lambda: len(list(root.glob("thread_*.bak"))) == 1)
         await pilot.pause()

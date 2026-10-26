@@ -147,3 +147,13 @@ with the old prefill length. Manual session.compact shares the session lock,
 uses a lazily created provider, and returns RPC statistics (no compacted event).
 Offline daemon replaces both app and runner provider references. Keep S5 cleanup
 and Windows/UTF-8 fixes. Do not collect real-model test_run_e2e.py offline.
+
+## S7 learning branch
+
+See doc/STUDY_GUIDE_S7.md and doc/S7_VALIDATION.md. Core owns MCP connections;
+Runner registers filtered tools and owns a per-run background subagent registry.
+Children share Provider/permission manager but start with fresh context and no
+MCP/note tools or automatic compaction. Parent cleanup cancels and awaits unfinished
+children; results are not available across runs. Skills use rendered system prompts.
+Keep S6 compaction persistence/lazy provider and S5/Windows cleanup fixes.
+Tests remain offline; tests/offline_daemon.py is not a production entry point.

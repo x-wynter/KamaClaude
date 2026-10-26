@@ -25,9 +25,9 @@ class ExecutionContext:
     global_context: str = ""
     project_context: str = ""
     messages: list[dict[str, Any]] = field(default_factory=list)
-    # 字段：已进入的模型请求轮数，由 Loop 递增。
     # 摘要替换消息列表后，旧 prefill 长度失效；Runner 据此选择整体写回。
     compaction_count: int = 0
+    # 字段：已进入的模型请求轮数，由 Loop 递增。
     step: int = 0
     # 字段：当前任务状态：running、success 或 failed。
     status: str = "running"  # "running" | "success" | "failed"
@@ -35,6 +35,9 @@ class ExecutionContext:
     reason: str | None = None
     # S3：Loop 在 end_turn 时写最终文本，Runner 通过 RunOutcome 返回；不含此前所有思考片段。
     result: str = ""
+    # skill 或 subagent 角色可覆盖默认 system prompt
+    # 覆盖只替换 base；根 run 的三层记忆仍追加，子 Context 默认没有这些字段内容。
+    system_prompt_override: str | None = None
 
     # 初始化消息历史，优先使用 session 完整回放内容
     def __post_init__(self) -> None:
@@ -44,10 +47,10 @@ class ExecutionContext:
         elif not self.messages:
             self.messages.append({"role": "user", "content": self.goal})
 
-    # 返回当前 run 的 system prompt，依次注入 global / project / session 三层记忆
+    # 返回当前 run 的 system prompt；有 override 时跳过 base，直接注入记忆层
     def system_prompt(self, base: str) -> str:
         # 固定拼接顺序不代表覆盖优先级；三层是 run 开始时的快照。
-        parts = [base]
+        parts = [self.system_prompt_override if self.system_prompt_override else base]
         if self.global_context.strip():
             parts.append("\n\n## Global Context\n" + self.global_context.strip())
         if self.project_context.strip():

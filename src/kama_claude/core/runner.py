@@ -21,11 +21,14 @@ from kama_claude.core.events.writer import EventWriter
 from kama_claude.core.llm.base import LLMProvider
 from kama_claude.core.llm.provider import AnthropicProvider
 from kama_claude.core.loop import AgentLoop
+from kama_claude.core.mcp.server import McpServerManager
 from kama_claude.core.memory.loader import load_context_file
 from kama_claude.core.permissions.manager import PermissionManager
 from kama_claude.core.runs import RUNS_DIR, new_run_id
 from kama_claude.core.session.model import Session
 from kama_claude.core.session.store import SessionStore
+from kama_claude.core.subagent.registry import BackgroundTaskRegistry
+from kama_claude.core.subagent.tool import AgentResultTool, SpawnAgentTool
 from kama_claude.core.task.manager import TaskManager
 from kama_claude.core.tools.builtin import (
     BashTool,
@@ -78,6 +81,7 @@ class AgentRunner:
         runs_dir: Path | None = None,
         trace: TraceWriter | None = None,
         permission_manager: PermissionManager | None = None,
+        mcp_manager: McpServerManager | None = None,
     ) -> None:
         # 这里只保存依赖，不启动模型请求；运行主线入口是 run_and_capture。
         # self._config 的下划线表示内部属性约定，不是 Python 强制私有。
@@ -91,8 +95,11 @@ class AgentRunner:
         self._trace = trace
         # Core 创建的共享权限管理器；直接 Python 调用可不传，不由 Runner 每轮重建。
         self._permission_manager = permission_manager
+        self._mcp_manager = mcp_manager
+        # 本 Runner 内共享；Core 每条消息新建 Runner，不能跨消息查询后台结果。
+        self._task_registry = BackgroundTaskRegistry()
 
-    # 构建工具注册表，注入 TaskManager（任务工具共享同一实例）
+    # 构建工具注册表，注入 TaskManager（任务工具共享同一实例）；可选注入 SpawnAgentTool
     def _build_registry(
         self,
         task_manager: TaskManager,
@@ -100,20 +107,58 @@ class AgentRunner:
         session: Session | None = None,
         store: SessionStore | None = None,
         run_id: str | None = None,
+        provider: LLMProvider | None = None,
+        bus: EventBus | None = None,
+        child_runs_dir: Path | None = None,
+        session_id: str = "",
+        tool_whitelist: list[str] | None = None,
     ) -> ToolRegistry:
-        # 四种执行工具和四种待办工具始终注册；会话路径额外注册 note_save，共九种。
-        # 四个 task 工具共享本轮 Manager；注册只保存对象，不会执行工具。
+        # 每轮新建工具表：基础工具 → 会话 note → 子任务工具 → MCP。
+        # 白名单筛选注册项；未注册的名称仍由调用器报 unknown tool。
+        allowed: set[str] | None = set(tool_whitelist) if tool_whitelist else None
+
+        # 判断工具是否可注册，空白名单沿用全部可用工具。
+        def _ok(name: str) -> bool:
+            return allowed is None or name in allowed
+
         registry = ToolRegistry()
-        registry.register(ReadFileTool())
-        registry.register(BashTool())
-        registry.register(WriteFileTool())
-        registry.register(ListDirTool())
-        registry.register(TaskCreateTool(task_manager))
-        registry.register(TaskUpdateTool(task_manager))
-        registry.register(TaskListTool(task_manager))
-        registry.register(TaskGetTool(task_manager))
+        for t in [ReadFileTool(), BashTool(), WriteFileTool(), ListDirTool()]:
+            if _ok(t.name):
+                registry.register(t)
+        for t in [
+            TaskCreateTool(task_manager),
+            TaskUpdateTool(task_manager),
+            TaskListTool(task_manager),
+            TaskGetTool(task_manager),
+        ]:
+            if _ok(t.name):
+                registry.register(t)
         if session is not None and store is not None and run_id is not None:
-            registry.register(NoteSaveTool(store, session.id, run_id))
+            note_tool = NoteSaveTool(store, session.id, run_id)
+            if _ok(note_tool.name):
+                registry.register(note_tool)
+        if provider is not None and bus is not None and run_id is not None:
+            runs_dir = child_runs_dir or self._runs_dir
+            if _ok("spawn_agent"):
+                registry.register(
+                    SpawnAgentTool(
+                        provider=provider,
+                        parent_bus=bus,
+                        parent_run_id=run_id,
+                        permission_manager=self._permission_manager,
+                        max_steps=self._config.agent.max_steps,
+                        task_registry=self._task_registry,
+                        runs_dir=runs_dir,
+                        session_id=session_id,
+                        depth=0,
+                    )
+                )
+            if _ok("agent_result"):
+                registry.register(AgentResultTool(self._task_registry))
+        if self._mcp_manager is not None:
+            for mcp_tool in self._mcp_manager.get_tools():
+                if _ok(mcp_tool.name):
+                    registry.register(mcp_tool)
         return registry
 
     # 执行一次完整的 agent run（委托给 run_and_capture，忽略返回值）
@@ -128,6 +173,8 @@ class AgentRunner:
         run_id: str | None = None,
         session: Session | None = None,
         store: SessionStore | None = None,
+        system_prompt_override: str | None = None,
+        tool_whitelist: list[str] | None = None,
     ) -> RunOutcome:
         # 步骤 1：确定 run 目录和该 run 独有的任务 Manager；目录名将 run 与 task ID 隔开。
         run_id = run_id or new_run_id()
@@ -165,6 +212,7 @@ class AgentRunner:
             session_notes=notes,
             global_context=global_ctx,
             project_context=project_ctx,
+            system_prompt_override=system_prompt_override,
         )
         prefill_len = len(history)
         # 保存前缀长度，结束后只把本轮新增的 assistant/tool_result 追加回 thread。
@@ -176,16 +224,6 @@ class AgentRunner:
             writer.subscribe(bus)
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
 
-            # 步骤 5：把会话信息绑定到 note_save；无会话的直接调用仍保留八工具。
-            registry = self._build_registry(
-                task_manager,
-                session=session,
-                store=store,
-                run_id=run_id,
-            )
-
-            # 步骤 6：执行循环并记录取消状态。
-            # 暂存取消状态，写完结束事件并关闭文件后再向调用方抛出取消异常。
             cancelled = False
             try:
                 provider: LLMProvider = self._provider or AnthropicProvider(
@@ -197,13 +235,28 @@ class AgentRunner:
                         self._trace,
                         include_payload=self._config.trace.include_llm_payload,
                     )
+                session_id_str = session.id if session is not None else ""
+                child_runs_dir = (
+                    store.runs_dir(session.id)
+                    if session is not None and store is not None
+                    else self._runs_dir
+                )
+                registry = self._build_registry(
+                    task_manager,
+                    session=session,
+                    store=store,
+                    run_id=run_id,
+                    provider=provider,
+                    bus=bus,
+                    child_runs_dir=child_runs_dir,
+                    session_id=session_id_str,
+                    tool_whitelist=tool_whitelist,
+                )
                 session_dir = (
                     store.session_dir(session.id)
                     if session is not None and store is not None
                     else run_path
                 )
-                session_id_str = session.id if session is not None else ""
-                # 每个 run 独立压缩器；配置默认阈值 0，因此自动摘要默认关闭。
                 compactor = Compactor(bus, session_dir, session_id_str)
                 loop = AgentLoop(
                     provider,
@@ -226,6 +279,10 @@ class AgentRunner:
                 )
                 if not context.is_done():
                     context.mark_failed("llm_error")
+
+            # 不能让后台任务越过本 Runner 生命周期后失去查询入口和退出清理。
+            finally:
+                await self._task_registry.cancel_all()
 
             # 步骤 7：发布任务结束事件，离开上下文关闭文件。
             await bus.publish(

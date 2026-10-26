@@ -38,6 +38,7 @@ class TaskScenarioProvider:
         assert {s["name"] for s in tool_schemas} == {
             "read_file", "bash", "write_file", "list_dir",
             "task_create", "task_update", "task_list", "task_get",
+            "spawn_agent", "agent_result",
         }
         params: dict[str, Any]
         if step == 1:

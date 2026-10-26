@@ -150,13 +150,21 @@ class AnthropicProvider:
                 if attempt == _MAX_STREAM_RETRIES:
                     log.error(
                         "stream failed after %d attempts run_id=%s step=%d: %s",
-                        _MAX_STREAM_RETRIES, run_id, step, exc,
+                        _MAX_STREAM_RETRIES,
+                        run_id,
+                        step,
+                        exc,
                     )
                     raise
                 delay = _RETRY_BACKOFF_S[attempt - 1]
                 log.warning(
                     "stream dropped (attempt %d/%d) run_id=%s step=%d: %s — retrying in %.0fs",
-                    attempt, _MAX_STREAM_RETRIES, run_id, step, exc, delay,
+                    attempt,
+                    _MAX_STREAM_RETRIES,
+                    run_id,
+                    step,
+                    exc,
+                    delay,
                 )
                 await asyncio.sleep(delay)
 
@@ -186,11 +194,17 @@ class AnthropicProvider:
         # 步骤 8：提取工具调用，转换为项目内部结构。
         tool_calls: list[ToolCallBlock] = []
         # 筛选 tool_use 块并转换为项目类型；provider 本身不执行这些工具。
+        thinking_blocks: list[dict[str, object]] = []
         for block in final_message.content:
             if block.type == "tool_use":
                 tool_calls.append(
                     # dict(block.input) 转成普通字典，避免把 SDK 的响应类型传进工具层。
                     ToolCallBlock(id=block.id, name=block.name, input=dict(block.input))
+                )
+            elif block.type == "thinking":
+                # thinking blocks must be passed back verbatim in subsequent requests
+                thinking_blocks.append(
+                    {"type": "thinking", "thinking": block.thinking, "signature": block.signature}
                 )
 
         # 步骤 9：返回统一响应，供 Loop 判断下一步。
@@ -200,6 +214,7 @@ class AnthropicProvider:
             tool_calls=tool_calls,
             # join 一次拼接全部文本片段；空列表会得到空字符串。
             text="".join(text_parts),
+            thinking_blocks=thinking_blocks,
             usage=UsageStats(
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,

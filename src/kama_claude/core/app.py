@@ -46,6 +46,7 @@ from kama_claude.core.config import KamaConfig, get_config
 from kama_claude.core.events.bus import EventBus
 from kama_claude.core.llm.provider import AnthropicProvider
 from kama_claude.core.logging_setup import setup_logging
+from kama_claude.core.mcp.server import McpServerManager
 from kama_claude.core.permissions.manager import PermissionManager
 from kama_claude.core.permissions.storage import load_policy_file
 from kama_claude.core.runner import AgentRunner
@@ -129,6 +130,7 @@ class CoreApp:
         self._sessions: SessionManager | None = None
         # Core 启动时创建的权限管理器跨 run/session 复用，独立于会话锁。
         self._permission_manager: PermissionManager | None = None
+        self._mcp_manager: McpServerManager | None = None
 
     # 记录提交会话的连接；直接调用 handler 的测试可以没有网络上下文。
     def _remember_session(self, sid: str) -> None:
@@ -315,7 +317,7 @@ class CoreApp:
         self._config = get_config()
         setup_logging(self._config)
 
-        # 步骤 2：先启动 trace，再接线广播器/会话工厂，最后注册八个 RPC 入口。
+        # 步骤 2：先启动 trace，再接线广播器/会话工厂，最后注册九个 RPC 入口。
         # Path.expanduser 将 ~ 展开到用户目录；trace=None 表示禁用所有这些采集点。
         if self._config.trace.enabled:
             trace_path = Path(self._config.trace.file).expanduser()
@@ -339,45 +341,52 @@ class CoreApp:
         sessions_root = Path("~/.kama/sessions").expanduser()
         store = SessionStore(sessions_root)
         assert self._config is not None
-        self._sessions = SessionManager(
-            # lambda 是延迟调用的工厂；每条消息运行时才创建独立 Runner。
-            store,
-            runner_factory=lambda: AgentRunner(
-                self._config,  # type: ignore[arg-type]
-                bus=self._bus,
-                trace=self._trace,
-                permission_manager=self._permission_manager,
-            ),
-            bus=self._bus,
-            # 延迟创建压缩 Provider，保持无凭据时 ping/离线 daemon 仍可启动。
-            provider_factory=lambda: AnthropicProvider(self._config.llm.default_model),  # type: ignore[union-attr]
-        )
-
-        server = SocketServer(
-            self._config.host,
-            self._config.port,
-            self._broadcaster,
-            trace=self._trace,
-            on_disconnect=self._on_disconnect,
-        )
-        server.register("core.ping", self._ping_handler)
-        server.register("agent.run", self._agent_run_handler)
-        server.register("event.subscribe", self._subscribe_handler)
-        server.register("session.create", self._session_create_handler)
-        server.register("session.send_message", self._session_send_handler)
-        server.register("session.get_history", self._session_history_handler)
-        server.register("session.close", self._session_close_handler)
-        server.register("permission.respond", self._permission_respond_handler)
-        server.register("session.compact", self._session_compact_handler)
-
-        # 步骤 3：启动监听并记录服务信息。
-        # await 等待监听启动完成；已有连接的处理由事件循环继续调度。
-        addr = await server.start()
-        logger.info("kama-core %s listening addr=%s", kama_claude.__version__, addr)
-        logger.info("config: %s", self._config)
-
-        # 步骤 4：等待跨平台退出信号；取消所有 run 后再关闭网络和 trace。
+        self._mcp_manager = McpServerManager()
+        server: SocketServer | None = None
         try:
+            if self._config.mcp.servers:
+                logger.info("mcp: starting %d server(s)", len(self._config.mcp.servers))
+                await self._mcp_manager.start_all(self._config.mcp.servers)
+
+            self._sessions = SessionManager(
+                # lambda 是延迟调用的工厂；每条消息运行时才创建独立 Runner。
+                store,
+                runner_factory=lambda: AgentRunner(
+                    self._config,  # type: ignore[arg-type]
+                    bus=self._bus,
+                    trace=self._trace,
+                    permission_manager=self._permission_manager,
+                    mcp_manager=self._mcp_manager,
+                ),
+                bus=self._bus,
+                # 延迟创建压缩 Provider，保持无凭据时 ping/离线 daemon 仍可启动。
+                provider_factory=lambda: AnthropicProvider(self._config.llm.default_model),  # type: ignore[union-attr]
+            )
+
+            server = SocketServer(
+                self._config.host,
+                self._config.port,
+                self._broadcaster,
+                trace=self._trace,
+                on_disconnect=self._on_disconnect,
+            )
+            server.register("core.ping", self._ping_handler)
+            server.register("agent.run", self._agent_run_handler)
+            server.register("event.subscribe", self._subscribe_handler)
+            server.register("session.create", self._session_create_handler)
+            server.register("session.send_message", self._session_send_handler)
+            server.register("session.get_history", self._session_history_handler)
+            server.register("session.close", self._session_close_handler)
+            server.register("permission.respond", self._permission_respond_handler)
+            server.register("session.compact", self._session_compact_handler)
+
+            # 步骤 3：启动监听并记录服务信息。
+            # await 等待监听启动完成；已有连接的处理由事件循环继续调度。
+            addr = await server.start()
+            logger.info("kama-core %s listening addr=%s", kama_claude.__version__, addr)
+            logger.info("config: %s", self._config)
+
+            # 步骤 4：等待跨平台退出信号；取消所有 run 后再关闭网络和 trace。
             await _wait_for_shutdown()
         finally:
             logger.info("shutting down")
@@ -387,9 +396,15 @@ class CoreApp:
                 run_task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-            await server.stop()
-            if self._trace is not None:
-                await self._trace.stop()
+            try:
+                if server is not None:
+                    await server.stop()
+            finally:
+                try:
+                    await self._mcp_manager.stop_all()
+                finally:
+                    if self._trace is not None:
+                        await self._trace.stop()
 
 
 # ── 函数：run ──

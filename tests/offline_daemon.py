@@ -24,6 +24,14 @@ class OfflineProvider:
         step: int = 0,
         system: str | None = None,
     ) -> LlmResponse:
+        if step == 1 and str(messages[-1].get("content", "")).startswith("/orchestrate s7"):
+            assert system is not None and "$ARGUMENTS" not in system
+            assert "s7" in system
+            return LlmResponse(stop_reason="tool_use", tool_calls=[
+                ToolCallBlock(id=f"s7-{run_id}", name="spawn_agent", input={
+                    "description": "离线子任务", "prompt": "检查子任务", "subagent_type": "planner",
+                }),
+            ])
         if step == 1 and str(messages[-1].get("content", "")).startswith("s5 permission"):
             return LlmResponse(stop_reason="tool_use", tool_calls=[
                 ToolCallBlock(id=f"s5-{run_id}", name="write_file", input={

@@ -1,4 +1,4 @@
-# ═══ 文件职责：终端内的多轮会话、权限审批与上下文压缩界面（S6） ═══
+# ═══ 文件职责：终端会话、权限、压缩、Skill 补全与子任务进度界面（S7） ═══
 # 协作关系：Textual 管理输入/控件；SocketClient 提交会话消息并接收 Core 事件。
 # 阅读路线：先看界面字段与 compose，再看 on_mount/_socket_loop，最后看事件显示。
 # 注释层次：文件概览 → 类/字段 → 函数用途 → 步骤 → 调用细节。
@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from rich.markdown import Markdown
@@ -22,6 +23,7 @@ from textual.widget import Widget
 from textual.widgets import Label, Static, TextArea
 
 from kama_claude.core.config import KamaConfig
+from kama_claude.core.skills.loader import SkillLoader
 from kama_claude.core.transport.socket_client import IpcError, SocketClient
 
 log = logging.getLogger(__name__)
@@ -30,6 +32,8 @@ log = logging.getLogger(__name__)
 # 返回最多 n 个字符的预览，超出时加省略号；完整内容仍保存在控件字段中。
 def _preview(s: str, n: int) -> str:
     return s[:n] + "…" if len(s) > n else s
+
+
 
 
 # 标准库 json.dumps 将参数字典转为可显示文本；ensure_ascii=False 保留中文。
@@ -204,6 +208,7 @@ class PermissionSelect(Static):
         self._cursor = 0
 
     # 挂载后首次绘制选项并请求焦点，下一帧回调辅助观察焦点归属。
+    # 挂载补全控件时绘制候选项，尚未发送任何 RPC。
     def on_mount(self) -> None:
         self.update(self._render_ui())
         self.focus()
@@ -321,6 +326,83 @@ class PermissionBlock(Static):
         self.post_message(self.Resolved(self, decision))
 
 
+class SlashCompleteWidget(Static):
+    """斜杠命令自动补全弹出框：输入 / 时显示可用 skill 列表并支持键盘筛选与选择。"""
+
+    can_focus = False
+
+    DEFAULT_CSS = """
+    SlashCompleteWidget {
+        height: auto;
+        padding: 0 1;
+        margin: 0 2;
+        background: $surface;
+        border: round $surface-lighten-2;
+    }
+    """
+
+    # 用户选中某条命令时发布
+    class Selected(Message):
+        # 初始化，携带被选中的 skill 名称
+        def __init__(self, skill_name: str) -> None:
+            self.skill_name = skill_name
+            super().__init__()
+
+    # 初始化，接收全量 (name, description) 列表
+    def __init__(self, items: list[tuple[str, str]]) -> None:
+        super().__init__("")
+        self._all_items = items
+        self._filtered: list[tuple[str, str]] = list(items)
+        self._cursor = 0
+
+    # 根据查询字符串筛选列表，重置光标并重新渲染
+    def set_query(self, query: str) -> None:
+        q = query.lower()
+        self._filtered = [(n, d) for n, d in self._all_items if not q or q in n.lower()]
+        self._cursor = min(self._cursor, max(0, len(self._filtered) - 1))
+        if self.is_attached:
+            self._redraw()
+
+    # 向上移动光标并重新渲染
+    def move_up(self) -> None:
+        if self._filtered:
+            self._cursor = (self._cursor - 1) % len(self._filtered)
+            self._redraw()
+
+    # 向下移动光标并重新渲染
+    def move_down(self) -> None:
+        if self._filtered:
+            self._cursor = (self._cursor + 1) % len(self._filtered)
+            self._redraw()
+
+    # 选中当前光标项并发布 Selected 消息
+    def select_current(self) -> None:
+        if self._filtered:
+            self.post_message(self.Selected(self._filtered[self._cursor][0]))
+
+    # 返回当前是否有可选项
+    def has_selection(self) -> bool:
+        return len(self._filtered) > 0
+
+    def on_mount(self) -> None:
+        self._redraw()
+
+    # 渲染筛选后的命令列表，高亮当前光标项
+    def _redraw(self) -> None:
+        if not self._filtered:
+            self.update("[dim]  no matching commands[/dim]")
+            return
+        lines: list[str] = []
+        for i, (name, desc) in enumerate(self._filtered):
+            desc_part = f"  [dim]{desc}[/dim]" if desc else ""
+            if i == self._cursor:
+                lines.append(f"  [bold cyan]❯ /{name}[/bold cyan]{desc_part}")
+            else:
+                lines.append(f"    [cyan]/{name}[/cyan]{desc_part}")
+        lines.append("[dim]  ↑↓ navigate   tab/enter select   esc dismiss[/dim]")
+        self.update("\n".join(lines))
+
+
 # TextArea 是第三方 Textual 控件；嵌套 Submitted 是界面消息，不是 bus 协议事件。
 # 阅读顺序：Submitted 保存输入快照 → _on_key 发消息 → App 的提交处理函数。
 class ChatTextArea(TextArea):
@@ -351,12 +433,36 @@ class ChatTextArea(TextArea):
             self.value = area.text
             super().__init__()
 
-    # Enter 提交；Cmd/Shift/Alt+Enter 插入换行；其余键交回 TextArea 默认行为
+    # 输入内容以 / 开头且无空格时发布，query 为 / 之后的字符串（可为空串）；None 表示收起弹窗
+    class SlashChanged(Message):
+        def __init__(self, query: str | None) -> None:
+            self.query = query
+            super().__init__()
+
+    # 文本变化时检测 / 前缀，通知宿主 App 更新自动补全弹窗
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        text = self.text
+        if text.startswith("/") and " " not in text:
+            self.post_message(ChatTextArea.SlashChanged(query=text[1:]))
+        else:
+            self.post_message(ChatTextArea.SlashChanged(query=None))
+
+    # Enter 提交；↑↓/Tab/Esc 路由到自动补全弹窗；Cmd/Shift/Alt+Enter 插入换行；其余键交回 TextArea
     async def _on_key(self, event: events.Key) -> None:
         key = event.key
+
+        popup: SlashCompleteWidget | None = None
+        try:
+            popup = self.app.query_one(SlashCompleteWidget)
+        except NoMatches:
+            popup = None
+
         if key == "enter":
             event.stop()
             event.prevent_default()
+            if popup is not None and popup.has_selection():
+                popup.select_current()
+                return
             if self.text.strip():
                 self.post_message(self.Submitted(self))
             return
@@ -366,6 +472,27 @@ class ChatTextArea(TextArea):
             if not self.read_only:
                 self.insert("\n")
             return
+        if popup is not None:
+            if key == "up":
+                event.stop()
+                event.prevent_default()
+                popup.move_up()
+                return
+            elif key == "down":
+                event.stop()
+                event.prevent_default()
+                popup.move_down()
+                return
+            elif key == "tab":
+                event.stop()
+                event.prevent_default()
+                popup.select_current()
+                return
+            elif key == "escape":
+                event.stop()
+                event.prevent_default()
+                self.post_message(ChatTextArea.SlashChanged(query=None))
+                return
         await super()._on_key(event)
 
 
@@ -392,6 +519,7 @@ class KamaTuiApp(App[None]):
         scrollbar-size-vertical: 1;
         scrollbar-size-horizontal: 1;
     }
+    #banner { padding: 1 2 0 2; }
     Static.user-turn { color: $text; padding: 1 2 0 2; }
     Static.run-header { color: $text-muted; padding: 1 2 0 2; }
     Static.step-divider { color: $text-muted; padding: 0 2; }
@@ -400,6 +528,28 @@ class KamaTuiApp(App[None]):
     Static.usage { padding: 0 2; }
     Static.log-line { padding: 0 2; }
     """
+
+    _BANNER = (
+        "[bold cyan]"
+        "██╗  ██╗ █████╗ ███╗   ███╗ █████╗  ██████╗██╗      █████╗ ██╗   ██╗██████╗ ███████╗"
+        "[/bold cyan]\n"
+        "[bold cyan]"
+        "██║ ██╔╝██╔══██╗████╗ ████║██╔══██╗██╔════╝██║     ██╔══██╗██║   ██║██╔══██╗██╔════╝"
+        "[/bold cyan]\n"
+        "[bold cyan]"
+        "█████╔╝ ███████║██╔████╔██║███████║██║     ██║     ███████║██║   ██║██║  ██║█████╗  "
+        "[/bold cyan]\n"
+        "[bold cyan]"
+        "██╔═██╗ ██╔══██║██║╚██╔╝██║██╔══██║██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝  "
+        "[/bold cyan]\n"
+        "[bold cyan]"
+        "██║  ██╗██║  ██║██║ ╚═╝ ██║██║  ██║╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗"
+        "[/bold cyan]\n"
+        "[bold cyan]"
+        "╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝"
+        "[/bold cyan]\n"
+        "[dim]  输入消息开始对话  ·  键入 / 触发 skill  ·  Ctrl+C 退出[/dim]"
+    )
 
     # 初始化连接参数和 TUI 内部状态
     def __init__(self, host: str, port: int, replay_run_id: str | None = None) -> None:
@@ -415,6 +565,9 @@ class KamaTuiApp(App[None]):
         self._session_id: str | None = None
         self._busy = False
         self._last_context_pct: float = 0.0
+        self._slash_items: list[tuple[str, str]] = []
+        self._subagent_run_ids: dict[str, str] = {}  # child run_id -> description
+        self._subagent_start_times: dict[str, float] = {}  # child run_id -> start time
 
     # Textual 调用的生成器：yield 逐个交出子控件；不是一次性返回一个列表。
     def compose(self) -> ComposeResult:
@@ -424,12 +577,57 @@ class KamaTuiApp(App[None]):
 
     # 控件挂载后启动收消息 worker，让界面事件循环继续处理输入与重绘。
     def on_mount(self) -> None:
+        self._slash_items = self._build_slash_items()
+        self._append(Static(self._BANNER, id="banner"))
         # worker 把长期收消息的协程交给框架管理，避免 on_mount 永远不能返回。
         # exclusive 会取消同组已有 worker；退出应用时框架负责取消 worker。
         self.run_worker(self._socket_loop(), exclusive=True, name="socket")
         prompt = self.query_one("#prompt", ChatTextArea)
         prompt.disabled = True
         prompt.border_title = "connecting..."
+
+    # TUI 用自身 cwd/HOME 查本地 Skill；服务端独立解析，二者目录不同时候选可能不一致。
+    # 构建斜杠命令候选列表：内建命令 + 所有已注册 skill
+    def _build_slash_items(self) -> list[tuple[str, str]]:
+        items: list[tuple[str, str]] = [("compact", "compress context window")]
+        try:
+            loader = SkillLoader()
+            for skill in loader.list_all_skills():
+                desc = skill.description.splitlines()[0] if skill.description else ""
+                if len(desc) > 60:
+                    desc = desc[:57] + "..."
+                items.append((skill.name, desc))
+        except Exception:
+            pass
+        return items
+
+    # 根据 / 前缀查询字符串挂载、更新或移除自动补全弹窗
+    def on_chat_text_area_slash_changed(self, event: ChatTextArea.SlashChanged) -> None:
+        query = event.query
+        if query is None:
+            try:
+                self.query_one(SlashCompleteWidget).remove()
+            except NoMatches:
+                pass
+            return
+        try:
+            popup = self.query_one(SlashCompleteWidget)
+            popup.set_query(query)
+        except NoMatches:
+            popup = SlashCompleteWidget(self._slash_items)
+            self.mount(popup, before="#prompt")
+            popup.set_query(query)
+
+    # 用户选中自动补全项后将 /{name} 填入输入框并移除弹窗
+    def on_slash_complete_widget_selected(self, event: SlashCompleteWidget.Selected) -> None:
+        prompt = self._prompt()
+        if prompt is not None:
+            prompt.text = f"/{event.skill_name} "
+            prompt.move_cursor(prompt.document.end)
+        try:
+            self.query_one(SlashCompleteWidget).remove()
+        except NoMatches:
+            pass
 
     # 记录按键焦点；当 PermissionSelect 失去焦点后作为兜底处理权限快捷键
     def on_key(self, event: events.Key) -> None:
@@ -671,6 +869,8 @@ class KamaTuiApp(App[None]):
                         "log.*",
                         "permission.*",
                         "context.*",
+                        "subagent.*",
+                        "skill.*",
                     ],
                     "scope": "global",
                 }
@@ -762,7 +962,50 @@ class KamaTuiApp(App[None]):
                 )
             )
 
+        elif t == "skill.invoked":
+            skill_name = event.get("skill_name", "")
+            arguments = event.get("arguments", "")
+            args_preview = _preview(arguments, 80) if arguments else ""
+            args_part = f"  [dim]{args_preview}[/dim]" if args_preview else ""
+            self._append(Static(
+                f"[bold cyan]/{skill_name}[/bold cyan]{args_part}",
+                classes="log-line",
+            ))
+
+        # 仅维护显示用索引和耗时；实际任务所有权与取消由 Core/Runner 管理。
+        elif t == "subagent.started":
+            run_id = event.get("run_id", "")
+            description = event.get("description", "")
+            self._subagent_run_ids[run_id] = description
+            self._subagent_start_times[run_id] = time.monotonic()
+            short_id = run_id[:8] if len(run_id) >= 8 else run_id
+            self._append(Static(
+                f"[dim]┌─[/dim] [cyan]{_preview(description, 72)}[/cyan]  [dim]{short_id}[/dim]",
+                classes="log-line",
+            ))
+
+        elif t == "subagent.finished":
+            run_id = event.get("run_id", "")
+            status = event.get("status", "")
+            description = self._subagent_run_ids.pop(run_id, event.get("description", ""))
+            start = self._subagent_start_times.pop(run_id, None)
+            elapsed = f"  [dim]{time.monotonic() - start:.1f}s[/dim]" if start is not None else ""
+            desc_part = f"[cyan]{_preview(description, 72)}[/cyan]{elapsed}"
+            if status == "success":
+                self._append(Static(
+                    f"[dim]└─[/dim] [bold green]✓[/bold green] {desc_part}",
+                    classes="log-line",
+                ))
+            else:
+                self._append(Static(
+                    f"[dim]└─[/dim] [bold red]✗[/bold red] {desc_part}",
+                    classes="log-line",
+                ))
+
         elif t == "step.started":
+            run_id = event.get("run_id", "")
+            if run_id in self._subagent_run_ids:
+                return
             step = event.get("step", "")
             self._append(
                 Static(
@@ -775,7 +1018,10 @@ class KamaTuiApp(App[None]):
             tool_use_id = str(event.get("tool_use_id", ""))
             tool_name = str(event.get("tool_name", ""))
             params = event.get("params") or {}
+            run_id = event.get("run_id", "")
             tc_block = ToolCallBlock(tool_name, params)
+            if run_id in self._subagent_run_ids:
+                tc_block.styles.padding = (0, 2, 0, 6)
             # 按调用 ID 匹配结束事件，同一工具名可同时出现多次，不能用名字做键。
             self._pending_tool_blocks[tool_use_id] = tc_block
             self._append(tc_block)
@@ -819,6 +1065,9 @@ class KamaTuiApp(App[None]):
                 )
 
         elif t == "llm.usage":
+            run_id = event.get("run_id", "")
+            if run_id in self._subagent_run_ids:
+                return
             pct = float(event.get("context_pct") or 0.0)
             self._last_context_pct = pct
             ctx_bar = self._render_ctx_bar(pct)
